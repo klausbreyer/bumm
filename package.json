@@ -7,13 +7,14 @@
     "dev": "vite --host 127.0.0.1 --port 4176 --strictPort",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4176 --strictPort",
-    "test": "bun test tests/music.test.ts",
+    "test": "bun test tests/*.test.ts",
     "test:browser": "playwright test"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.4.1",
+    "fake-indexeddb": "^6.2.5",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
     "vite": "^8.2.2"

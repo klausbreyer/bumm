@@ -244,3 +244,87 @@ dialog .play-button { width:100%; }
   dialog { padding:22px; } dialog h2 { font-size:35px; } dialog .play-button { flex:none; }
 }
 @media(prefers-reduced-motion:reduce) { button:active:not(:disabled) { transform:none; } }
+
+:root { --voice:#ff806e; }
+.sing-link { color:var(--voice); margin-right:15px; font-weight:600; }
+.voice-present { display:block; margin-top:7px; font-size:10px; color:var(--voice); }
+.vocal-scroll { position:relative; overflow-x:auto; padding:3px 3px 15px; margin:0 -3px 17px; scrollbar-width:thin; scrollbar-color:#555 #111; }
+.vocal-grid { display:grid; gap:8px; }
+.lane-heading { display:flex; align-items:center; color:#888; letter-spacing:.8px; font-size:9px; font-weight:600; }
+.vocal-part-heading { text-align:left; padding:12px 14px; background:#111; border-top:2px solid #666; min-height:76px; }
+.vocal-part-heading>span { display:block; font-size:10px; color:#aaa; margin-bottom:5px; }
+.vocal-part-heading>strong { display:block; font-family:var(--font-display); font-size:26px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.vocal-part-heading.chosen { background:#25110e; border-color:var(--voice); }
+.vocal-part-heading.chosen>strong { color:var(--voice); }
+.lane-label { display:flex; align-items:center; font-size:12px; font-weight:600; color:var(--tone,#fff); }
+.lane-label,.lane-heading { position:sticky; left:0; z-index:1; background:#000; }
+.beat-clip { min-height:43px; padding:12px 14px; background:#080808; border:1px solid #262626; font-size:12px; color:#777; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.beat-clip.filled { background:var(--tone); color:black; border-color:var(--tone); font-weight:600; }
+.clip-rest { display:block; text-align:center; }
+.voice-lane-label { gap:8px; color:var(--voice); font-weight:700; }
+.voice-lane-label .icon { width:19px; height:26px; }
+.voice-clip { display:flex; flex-direction:column; justify-content:center; align-items:stretch; gap:6px; text-align:center; min-height:97px; padding:13px; background:#0a0908; border:1px dashed #5a403b; color:#c39289; font-size:12px; }
+.voice-clip.has-voice { text-align:left; border-style:solid; border-color:#a34c40; background:#25110e; color:var(--voice); }
+.voice-clip.chosen { border:2px dashed var(--voice); background:#1b0c09; color:var(--voice); font-weight:600; }
+.voice-clip.has-voice.chosen { border-style:solid; }
+.voice-clip.is-playing { border:2px solid white; }
+.vocal-waveform { width:100%; height:40px; display:block; }
+.wave-loading { color:#aaa; font-size:10px; }
+.vocal-part-tools { display:flex; align-items:center; gap:0; }
+.vocal-part-tools>button { display:flex; justify-content:center; align-items:center; min-width:36px; min-height:44px; font-size:22px; }
+.vocal-part-tools>button:not(:disabled):hover { background:#161616; }
+.vocal-part-tools>.edit-sounds { margin-left:auto; font-size:11px; padding-left:4px; white-space:nowrap; }
+.voice-recorder { border-top:1px solid #444; padding:23px 0 26px; }
+.record-target { display:flex; justify-content:space-between; align-items:center; gap:24px; }
+.record-target-copy { min-width:0; }
+.record-target h3 { font-size:21px; font-weight:600; margin:0; }
+.record-target p { font-size:13px; line-height:1.4; color:#bbb; margin:7px 0 0; }
+.record-controls { display:flex; align-items:center; gap:18px; flex-shrink:0; }
+.record-button { display:flex; align-items:center; justify-content:center; gap:9px; padding:14px 20px; min-height:54px; min-width:195px; background:var(--voice); color:#000; font-size:15px; font-weight:700; }
+.record-button:not(:disabled):hover { background:#ff9a8c; }
+.record-button .icon { width:21px; height:24px; }
+.record-button:disabled { opacity:.65; }
+.cancel-record { min-height:44px; font-size:12px; text-decoration:underline; text-underline-offset:4px; }
+.record-progress { height:3px; background:#242424; margin:22px 0; }
+.record-progress>div { background:var(--voice); width:0; height:100%; }
+.voice-mix-controls { display:flex; align-items:center; flex-wrap:wrap; gap:25px; }
+.voice-mix-controls>label { display:flex; align-items:center; gap:13px; white-space:nowrap; font-size:12px; }
+.voice-mix-controls input { width:105px; --tone:var(--voice); height:36px; }
+.voice-mix-controls>label:first-child input { --tone:var(--lime); }
+.mic-meter { display:flex; align-items:center; gap:12px; font-size:11px; color:#aaa; }
+.mic-meter>i { display:block; width:78px; height:7px; background:#292929; }
+.mic-meter b { display:block; height:100%; width:0; background:var(--voice); }
+.remove-voice { margin-left:auto; color:#bbb; font-size:11px; }
+.record-note { font-size:11px; line-height:1.5; color:#999; margin:18px 0 0; }
+.voice-timing { margin-top:15px; font-size:12px; color:#aaa; }
+.voice-timing summary { cursor:pointer; min-height:44px; display:list-item; align-content:center; }
+.voice-timing label { display:flex; align-items:center; gap:14px; padding-top:12px; max-width:450px; font-size:11px; }
+.voice-timing input { --tone:var(--voice); }
+.voice-timing output { min-width:50px; text-align:right; }
+.voice-timing p { font-size:11px; color:#888; margin:8px 0 0; }
+.vocal-empty { padding:50px 0; font-size:16px; color:#bbb; }
+@media(max-width:1050px) {
+  .record-target { flex-wrap:wrap; gap:20px; }
+  .record-controls { margin-left:auto; }
+  .voice-mix-controls { gap:18px; }
+}
+@media(max-width:760px) {
+  .record-controls { width:100%; margin:0; }
+  .record-button { flex:1; }
+  .voice-mix-controls { justify-content:space-between; gap:14px; }
+  .voice-mix-controls>label { gap:10px; }
+  .voice-mix-controls input { width:85px; }
+  .remove-voice { margin-left:0; }
+}
+@media(max-width:540px) {
+  .record-target h3 { font-size:21px; }
+  .record-target p { font-size:12px; }
+  .record-controls { flex-wrap:wrap; gap:10px; }
+  .record-button { min-width:100%; font-size:16px; }
+  .record-controls>.text-button,.cancel-record { width:100%; border:1px solid #444; min-height:44px; }
+  .voice-recorder { padding-top:20px; }
+  .voice-mix-controls>label { justify-content:space-between; width:100%; }
+  .voice-mix-controls input { width:58%; height:36px; }
+  .record-note { font-size:11px; }
+  .sing-link { margin-right:3px; font-size:10px; }
+}

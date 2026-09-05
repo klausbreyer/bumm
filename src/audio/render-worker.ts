@@ -2,8 +2,9 @@ import { renderBank, renderWav } from '../music/render';
 import type { LoopBank } from '../music/render';
 import type { PackId } from '../music/catalog';
 import type { Project } from '../music/project';
+import type { TakeLibrary } from '../music/vocals';
 
-export type RenderRequest = { id: number } & ({ type: 'bank'; pack: PackId; bpm: number } | { type: 'wav'; project: Project });
+export type RenderRequest = { id: number } & ({ type: 'bank'; pack: PackId; bpm: number } | { type: 'wav'; project: Project; takes: TakeLibrary });
 const cache = new Map<string, LoopBank>();
 
 function bank(pack: PackId, bpm: number): LoopBank {
@@ -21,7 +22,7 @@ self.onmessage = (event: MessageEvent<RenderRequest>) => {
     if (request.type === 'bank') {
       self.postMessage({ id:request.id, value:bank(request.pack,request.bpm) });
     } else {
-      const wav = renderWav(request.project,bank(request.project.pack,request.project.bpm));
+      const wav = renderWav(request.project,bank(request.project.pack,request.project.bpm),request.takes);
       self.postMessage({ id:request.id, value:wav },{ transfer:[wav] });
     }
   } catch (error) { self.postMessage({ id:request.id, error: error instanceof Error ? error.message : 'Audio konnte nicht erstellt werden.' }); }

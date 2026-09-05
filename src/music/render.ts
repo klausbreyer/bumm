@@ -3,6 +3,8 @@ import type { Loop, LoopId, PackId } from './catalog';
 import { ROLES } from './catalog';
 import { totalBars } from './project';
 import type { Project } from './project';
+import { beatGain, requireTakes, VOCAL_GAIN, vocalSample } from './vocals';
+import type { TakeLibrary } from './vocals';
 
 export const SAMPLE_RATE = 44100;
 export const MASTER_GAIN = 0.68;
@@ -187,7 +189,9 @@ export function renderBank(pack: PackId, bpm: number, sampleRate = SAMPLE_RATE):
 }
 
 /** Write PCM directly into the WAV buffer to bound memory use on mobile devices. */
-export function renderWav(project: Project, bank: LoopBank): ArrayBuffer {
+export function renderWav(project: Project, bank: LoopBank, takes: TakeLibrary = {}): ArrayBuffer {
+  requireTakes(project, takes);
+  const backingGain = beatGain(project);
   const frames = totalBars(project)*bank.frames/4;
   const frameCount = Math.round(frames);
   const output = new ArrayBuffer(44+frameCount*4);
@@ -200,14 +204,17 @@ export function renderWav(project: Project, bank: LoopBank): ArrayBuffer {
   let offset = 0;
   for (const part of project.song) {
     const partFrames = part.bars*bank.frames/4;
+    const clip = part.vocal;
+    const take = clip ? takes[clip.takeId] : null;
     const tracks = ROLES.flatMap(role => part.mix.loops[role] ? [{ samples:bank.loops[part.mix.loops[role]!], gain:part.mix.levels[role] }] : []);
     for (let i=0;i<partFrames;i++) {
       let left = 0; let right = 0;
       const position = i%bank.frames;
       for (const track of tracks) { left += track.samples.left[position]*track.gain; right += track.samples.right[position]*track.gain; }
       const fade = Math.min(1,i/(bank.sampleRate*.006),(partFrames-i-1)/(bank.sampleRate*.006));
-      view.setInt16(44+(offset+i)*4,Math.round(Math.max(-1,Math.min(1,left*MASTER_GAIN*fade))*32767),true);
-      view.setInt16(46+(offset+i)*4,Math.round(Math.max(-1,Math.min(1,right*MASTER_GAIN*fade))*32767),true);
+      const vocal = take && clip ? vocalSample(take, i/bank.sampleRate - clip.shiftMs/1000) * clip.volume * VOCAL_GAIN : 0;
+      view.setInt16(44+(offset+i)*4,Math.round(Math.max(-1,Math.min(1,(left*MASTER_GAIN*backingGain+vocal)*fade))*32767),true);
+      view.setInt16(46+(offset+i)*4,Math.round(Math.max(-1,Math.min(1,(right*MASTER_GAIN*backingGain+vocal)*fade))*32767),true);
     }
     offset += partFrames;
   }

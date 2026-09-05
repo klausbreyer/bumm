@@ -7,15 +7,31 @@ import '@fontsource/barlow-condensed/latin-800.css';
 import './style.css';
 import { PACKS, ROLES, ROLE_NAMES, findLoop } from './music/catalog';
 import type { Loop, LoopId, PackId, Role } from './music/catalog';
-import { MAX_PARTS, activeCount, clone, durationSeconds, makeStudio, parseStudio, toggleLoop, totalBars, validProject } from './music/project';
+import { MAX_PARTS, activeCount, clone, durationSeconds, makeStudio, parseStudio, toggleLoop, totalBars, hasVocals } from './music/project';
 import type { Mix, Project, Studio } from './music/project';
 import { BankClient } from './audio/bank-client';
 import { BrowserEngine } from './audio/browser-engine';
+import { MicrophoneRecorder, microphoneError, RecordingCancelled } from './audio/microphone-recorder';
+import { TakeStore } from './storage/takes';
+import { decodeProject, encodeProject, MAX_PROJECT_BYTES, remapImported } from './storage/project-file';
+import { waveform } from './music/vocals';
+import type { Take } from './music/vocals';
+import { vocalWorkspace } from './ui/vocal-workspace';
+import type { RecordingSession } from './ui/vocal-workspace';
 
-const STORAGE_KEY = 'bumm.studio.v1';
+const STORAGE_KEY = 'bumm.studio.v2';
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const bank = new BankClient();
 const audio = new BrowserEngine(bank);
+const takes = new TakeStore();
+const microphone = new MicrophoneRecorder();
+const waves = new Map<string, number[]>();
+let selectedVocalId: string | null = 'hook';
+let recording: RecordingSession | null = null;
+let recordGeneration = 0;
+let playGeneration = 0;
+let fileBusy = false;
+let previewPartId: string | null = null;
 let studio = makeStudio();
 let saveState: 'saved'|'unavailable'|'invalid' = 'saved';
 let view: 'loops'|'song' = 'loops';
@@ -29,7 +45,7 @@ let toastTimer = 0;
 let lastPosition = '';
 
 try {
-  const raw = localStorage.getItem(STORAGE_KEY);
+  const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem('bumm.studio.v1');
   if (raw) {
     const saved = parseStudio(raw);
     if (saved) studio = saved;
@@ -41,7 +57,7 @@ function project(): Project { return studio.projects[studio.currentPack]; }
 function esc(value: string): string { return value.replace(/[&<>"']/g,char => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[char]!); }
 function disabled(value: boolean): string { return value ? 'disabled' : ''; }
 function time(seconds: number): string { const rounded=Math.round(seconds); return `${Math.floor(rounded/60)}:${String(rounded%60).padStart(2,'0')}`; }
-function locked(): boolean { return busy || audio.mode==='song'; }
+function locked(): boolean { return busy || fileBusy || recording !== null || audio.mode==='song'; }
 function save(): void {
   try { localStorage.setItem(STORAGE_KEY,JSON.stringify(studio)); saveState='saved'; }
   catch { saveState='unavailable'; }
@@ -125,36 +141,41 @@ function partTracks(mix: Mix): string {
 function arranger(): string {
   const p = project();
   return `<section class="arranger ${view==='song'?'expanded':''}" id="arranger" aria-label="Song-Arranger">
-    <div class="arranger-heading"><div><div class="song-title-line"><h2>Dein Song</h2><span class="song-length">${p.song.length} Teile <span>·</span> ${time(durationSeconds(p))}</span></div><p>Erst der Beat. Dann die Hook. Dann alles zusammen.</p></div><div class="arranger-actions"><button class="text-button" data-action="play-song" data-focus="play-song" ${disabled(busy||!p.song.length)}>${icon(audio.mode==='song'?'stop':'play')} ${audio.mode==='song'?'Song stoppen':'Song abspielen'}</button><button class="export-button" data-action="export-wav" data-focus="export-wav" ${disabled(exporting||!p.song.length||!p.song.some(part=>activeCount(part.mix)))}>${icon('down')} <span>${exporting?'Wird gebaut…':'Exportieren'}</span></button></div></div>
-    ${view==='song'?'<p class="arranger-tip">Schiebe Teile mit den Pfeilen an ihren Platz. Mit „Bearbeiten“ änderst du die Sounds.</p>':''}
+    <div class="arranger-heading"><div><div class="song-title-line"><h2>Dein Song</h2><span class="song-length">${p.song.length} Teile <span>·</span> ${time(durationSeconds(p))}</span></div><p>Erst der Beat. Dann die Hook. Dann alles zusammen.</p></div><div class="arranger-actions"><button class="text-button" data-action="play-song" data-focus="play-song" ${disabled(busy||recording!==null||fileBusy||!p.song.length)}>${icon(audio.mode==='song'?'stop':'play')} ${audio.mode==='song'?'Song stoppen':'Song abspielen'}</button><button class="export-button" data-action="export-wav" data-focus="export-wav" ${disabled(exporting||recording!==null||fileBusy||!p.song.length||!p.song.some(part=>activeCount(part.mix)||part.vocal))}>${icon('down')} <span>${exporting?'Wird gebaut…':hasVocals(p)?'Beat + Stimme exportieren':'Exportieren'}</span></button></div></div>
+    ${view==='song'?'<p class="arranger-tip">Wähle einen Songteil und sing oder rappe deinen Text dazu.</p>':''}
+    ${view==='song'?vocalWorkspace(p,selectedVocalId,recording,waves,locked()):`
     <div class="song-parts" aria-label="Songteile in Reihenfolge">${p.song.map((part,index)=>`<article class="song-part ${editingId===part.id?'editing':''}" data-part="${esc(part.id)}">
-      <div class="part-header"><span class="part-number">${String(index+1).padStart(2,'0')}</span><input class="part-name" aria-label="Name von Songteil ${index+1}" maxlength="24" value="${esc(part.name)}" data-name="${esc(part.id)}" data-focus="name-${esc(part.id)}" ${disabled(locked())}><select data-bars="${esc(part.id)}" data-focus="bars-${esc(part.id)}" aria-label="Länge von ${esc(part.name)}" ${disabled(locked())}><option value="4" ${part.bars===4?'selected':''}>4 Takte</option><option value="8" ${part.bars===8?'selected':''}>8 Takte</option></select></div>
-      <button class="part-edit" data-action="edit-part" data-id="${esc(part.id)}" data-focus="edit-${esc(part.id)}" aria-label="${esc(part.name)} bearbeiten" ${disabled(locked())}>${partTracks(part.mix)}<span class="part-edit-label">${icon('edit')} Bearbeiten</span></button>
+      <div class="part-header"><span class="part-number">${String(index+1).padStart(2,'0')}</span><input class="part-name" aria-label="Name von Songteil ${index+1}" maxlength="24" value="${esc(part.name)}" data-name="${esc(part.id)}" data-focus="name-${esc(part.id)}" ${disabled(locked())}><select data-bars="${esc(part.id)}" data-focus="bars-${esc(part.id)}" aria-label="Länge von ${esc(part.name)}" ${disabled(locked()||part.vocal!==null)}><option value="4" ${part.bars===4?'selected':''}>4 Takte</option><option value="8" ${part.bars===8?'selected':''}>8 Takte</option></select></div>
+      <button class="part-edit" data-action="edit-part" data-id="${esc(part.id)}" data-focus="edit-${esc(part.id)}" aria-label="${esc(part.name)} bearbeiten" ${disabled(locked())}>${partTracks(part.mix)}${part.vocal?'<span class="voice-present">Meine Stimme ✓</span>':''}<span class="part-edit-label">${icon('edit')} Bearbeiten</span></button>
       <div class="part-controls"><button class="icon-button" data-action="move-left" data-id="${esc(part.id)}" data-focus="left-${esc(part.id)}" aria-label="${esc(part.name)} nach links" ${disabled(index===0||locked())}>${icon('left')}</button><button class="icon-button" data-action="move-right" data-id="${esc(part.id)}" data-focus="right-${esc(part.id)}" aria-label="${esc(part.name)} nach rechts" ${disabled(index===p.song.length-1||locked())}>${icon('right')}</button><span class="control-spacer"></span><button class="icon-button" data-action="copy-part" data-id="${esc(part.id)}" aria-label="${esc(part.name)} kopieren" ${disabled(p.song.length>=MAX_PARTS||locked())}>${icon('copy')}</button><button class="icon-button" data-action="delete-part" data-id="${esc(part.id)}" aria-label="${esc(part.name)} entfernen" ${disabled(locked())}>${icon('trash')}</button></div>
-    </article>`).join('')}${p.song.length<MAX_PARTS?`<button class="new-part" data-action="add-part" ${disabled(locked()||activeCount(p.mix)===0)}>${icon('plus')}<span>Deine Mischung<br>als neuen Teil</span></button>`:''}</div>
-    <div class="arranger-footer"><span>${icon('arrow')} Die Teile spielen von links nach rechts.</span><span>${totalBars(p)} Takte <span class="footer-separator">/</span> ${p.bpm} BPM</span></div>
+    </article>`).join('')}${p.song.length<MAX_PARTS?`<button class="new-part" data-action="add-part" ${disabled(locked()||activeCount(p.mix)===0)}>${icon('plus')}<span>Deine Mischung<br>als neuen Teil</span></button>`:''}</div>`}
+    <div class="arranger-footer"><span>${icon('arrow')} ${view==='song'?'Beat und Stimme bleiben zusammen.':'Die Teile spielen von links nach rechts.'}</span><span>${view==='loops'?'<button class="text-button sing-link" data-action="view-song">Stimme aufnehmen →</button>':''}${totalBars(p)} Takte <span class="footer-separator">/</span> ${p.bpm} BPM</span></div>
   </section>`;
 }
 
 function render(): void {
+  if (!project().song.some(part => part.id === selectedVocalId)) selectedVocalId = project().song[0]?.id ?? null;
   const focused = document.activeElement instanceof HTMLElement ? document.activeElement.dataset.focus : undefined;
   const previousScroll = document.querySelector('.song-parts')?.scrollLeft ?? 0;
+  const oldTimeline = document.querySelector('.vocal-scroll');
+  const vocalScroll = oldTimeline?.scrollLeft ?? 0;
+  const oldSelection = oldTimeline?.querySelector<HTMLElement>('.vocal-part-heading.chosen')?.dataset.id;
   const p = project();
   const pack = PACKS[p.pack];
   const editing = p.song.find(part=>part.id===editingId);
   app.innerHTML=`<div class="studio-shell">
-    <header class="masthead flex items-center justify-between"><a class="wordmark" href="#" aria-label="BUMM, zum Beat-Baukasten">BUMM<span>.</span></a><p class="brand-line">DEIN BEAT.<br>DEIN DING.</p><div class="masthead-right"><span class="local-label"><span></span> DEIN KLEINES STUDIO</span><button class="help-button" data-action="help" aria-label="So geht BUMM">?</button></div></header>
+    <header class="masthead flex items-center justify-between"><a class="wordmark" href="#" aria-label="BUMM, zum Beat-Baukasten">BUMM<span>.</span></a><p class="brand-line">DEIN BEAT.<br>DEIN DING.</p><div class="masthead-right"><span class="local-label"><span></span> DEIN KLEINES STUDIO</span><button class="help-button" data-action="help" ${disabled(recording!==null||fileBusy)} aria-label="So geht BUMM">?</button></div></header>
     <section class="transport-panel" aria-label="Wiedergabe">
       <div class="project-title"><label for="project-name">DEIN TRACK</label><div><input id="project-name" data-focus="project-name" maxlength="48" aria-label="Name deines Tracks" value="${esc(p.name)}">${icon('edit')}</div></div>
-      <div class="transport-controls"><div class="tempo-control"><button data-action="bpm-down" aria-label="Langsamer" ${disabled(busy||audio.mode!==null||p.bpm<=pack.minBpm)}>−</button><label><input type="number" id="bpm" data-focus="bpm" aria-label="Tempo in BPM" min="${pack.minBpm}" max="${pack.maxBpm}" value="${p.bpm}" ${disabled(busy||audio.mode!==null)}><span>BPM</span></label><button data-action="bpm-up" aria-label="Schneller" ${disabled(busy||audio.mode!==null||p.bpm>=pack.maxBpm)}>+</button></div><button class="play-button" data-action="play" data-focus="play" aria-label="${audio.mode?'Wiedergabe stoppen':'Loops starten'}" ${disabled(busy)}>${icon(audio.mode?'stop':'play')}<span>${busy?'Lädt…':audio.mode?'Stopp':'Start'}</span></button></div>
+      <div class="transport-controls"><div class="tempo-control"><button data-action="bpm-down" aria-label="Langsamer" ${disabled(locked()||audio.mode!==null||hasVocals(p)||p.bpm<=pack.minBpm)}>−</button><label><input type="number" id="bpm" data-focus="bpm" aria-label="Tempo in BPM" min="${pack.minBpm}" max="${pack.maxBpm}" value="${p.bpm}" ${disabled(locked()||audio.mode!==null||hasVocals(p))}><span>${hasVocals(p)?'BPM · FEST':'BPM'}</span></label><button data-action="bpm-up" aria-label="Schneller" ${disabled(locked()||audio.mode!==null||hasVocals(p)||p.bpm>=pack.maxBpm)}>+</button></div><button class="play-button" data-action="play" data-focus="play" aria-label="${recording?'Aufnahme stoppen':audio.mode?'Wiedergabe stoppen':view==='song'?'Song starten':'Loops starten'}" ${disabled(busy||fileBusy)}>${icon(audio.mode?'stop':'play')}<span>${recording?'Stopp':busy?'Lädt…':audio.mode?'Stopp':'Start'}</span></button></div>
     </section>
-    <div class="studio-nav"><nav class="view-switch" aria-label="Studio-Bereich"><button data-action="view-loops" class="${view==='loops'?'active':''}" aria-pressed="${view==='loops'}"><span>01</span> Loops spielen</button><button data-action="view-song" class="${view==='song'?'active':''}" aria-pressed="${view==='song'}"><span>02</span> Mein Song</button></nav><div class="pack-switch" aria-label="Soundset"><button data-action="pack" data-pack="hiphop" aria-pressed="${p.pack==='hiphop'}" class="${p.pack==='hiphop'?'active':''}" ${disabled(busy)}>Hip-Hop</button><button data-action="pack" data-pack="techno" aria-pressed="${p.pack==='techno'}" class="${p.pack==='techno'?'active':''}" ${disabled(busy)}>Techno</button></div></div>
-    <div class="playback-strip"><div class="beat-display" aria-label="Taktanzeige"><span id="bar-label">TAKT 01</span><div class="beat-lights" aria-hidden="true"><i></i><i></i><i></i><i></i></div></div><span id="playback-status">${busy?'Deine Sounds werden vorbereitet.':'Such dir Sounds aus. Dann drück Start.'}</span><button class="undo-button" data-action="undo" aria-label="Letzte Änderung rückgängig" ${disabled(!history.length||busy)}>${icon('undo')} <span>Rückgängig</span></button></div>
+    <div class="studio-nav"><nav class="view-switch" aria-label="Studio-Bereich"><button data-action="view-loops" class="${view==='loops'?'active':''}" ${disabled(recording!==null||fileBusy)} aria-pressed="${view==='loops'}"><span>01</span> Loops spielen</button><button data-action="view-song" class="${view==='song'?'active':''}" ${disabled(recording!==null||fileBusy)} aria-pressed="${view==='song'}"><span>02</span> Mein Song</button></nav><div class="pack-switch" aria-label="Soundset"><button data-action="pack" data-pack="hiphop" aria-pressed="${p.pack==='hiphop'}" class="${p.pack==='hiphop'?'active':''}" ${disabled(busy||recording!==null||fileBusy)}>Hip-Hop</button><button data-action="pack" data-pack="techno" aria-pressed="${p.pack==='techno'}" class="${p.pack==='techno'?'active':''}" ${disabled(busy||recording!==null||fileBusy)}>Techno</button></div></div>
+    <div class="playback-strip"><div class="beat-display" aria-label="Taktanzeige"><span id="bar-label">TAKT 01</span><div class="beat-lights" aria-hidden="true"><i></i><i></i><i></i><i></i></div></div><span id="playback-status">${busy?'Deine Sounds werden vorbereitet.':'Such dir Sounds aus. Dann drück Start.'}</span><button class="undo-button" data-action="undo" aria-label="Letzte Änderung rückgängig" ${disabled(!history.length||busy||recording!==null||fileBusy)}>${icon('undo')} <span>Rückgängig</span></button></div>
     ${view==='loops'?`<section class="loop-workspace" aria-label="Loop-Baukasten"><div class="pads-section"><div class="section-heading"><h1>${editing?`Mischung für „${esc(editing.name)}“`:'Was spielt mit?'}</h1>${editing?'<button class="text-button finish-edit" data-action="finish-edit">Fertig '+icon('check')+'</button>':'<span class="matching-note">'+icon('spark')+' Alles passt zusammen</span>'}</div><div class="pad-grid">${pack.loops.map(pad).join('')}</div><p class="pads-tip"><span>Antippen: dazu. Nochmal: weg.</span><span>Pro Farbe spielt ein Sound.</span></p></div>${mixer()}</section>`:''}
     ${arranger()}
-    <footer class="studio-footer"><div class="file-actions"><button class="text-button" data-action="save-project">${icon('save')} Projekt sichern</button><button class="text-button" data-action="load-project">Projekt laden</button><input id="project-file" class="sr-only" type="file" accept=".json,application/json" aria-label="Projektdatei wählen" tabindex="-1"></div><span id="save-label" class="save-label"></span><label class="master-volume">${icon('volume')}<span class="sr-only">Abhörlautstärke</span><input type="range" id="master-volume" data-focus="master-volume" min="0" max="100" value="${masterVolume}"></label></footer>
+    <footer class="studio-footer"><div class="file-actions"><button class="text-button" data-action="save-project" ${disabled(busy||recording!==null||fileBusy)}>${icon('save')} Projekt sichern</button><button class="text-button" data-action="load-project" ${disabled(busy||recording!==null||fileBusy)}>Projekt laden</button><input id="project-file" class="sr-only" type="file" accept=".bumm,.json,application/json,application/octet-stream" aria-label="Projektdatei wählen" tabindex="-1"></div><span id="save-label" class="save-label"></span><label class="master-volume">${icon('volume')}<span class="sr-only">Abhörlautstärke</span><input type="range" id="master-volume" data-focus="master-volume" min="0" max="100" value="${masterVolume}"></label></footer>
     <p class="studio-signoff">KLEINE IDEEN. GROSSE BEATS.</p>
-    <dialog id="help-dialog"><div class="dialog-heading"><span class="wordmark">BUMM<span>.</span></span><button class="icon-button" data-action="close-help" aria-label="Hilfe schließen">${icon('close')}</button></div><h2>Du hast den Takt.</h2><ol><li><strong>Sounds aussuchen</strong><p>Tippe auf die großen Pads. Pro Farbe passt ein Sound in deine Mischung.</p></li><li><strong>Start drücken</strong><p>Alles spielt im gleichen Takt. Neue Sounds steigen beim nächsten Takt ein.</p></li><li><strong>Einen Song bauen</strong><p>Merke dir Mischungen als Songteile. Ordne sie mit den Pfeilen an. Fertig ist dein Track.</p></li></ol><p class="storage-help">Deine Projekte bleiben in diesem Browser. Mit „Projekt sichern“ kannst du sie aufheben oder auf einem anderen Gerät laden. „Exportieren“ speichert den Song als WAV-Datei.</p><button class="play-button" data-action="close-help">Los geht’s ${icon('arrow')}</button></dialog>
+    <dialog id="help-dialog"><div class="dialog-heading"><span class="wordmark">BUMM<span>.</span></span><button class="icon-button" data-action="close-help" aria-label="Hilfe schließen">${icon('close')}</button></div><h2>Du hast den Takt.</h2><ol><li><strong>Sounds aussuchen</strong><p>Tippe auf die großen Pads. Pro Farbe passt ein Sound in deine Mischung.</p></li><li><strong>Start drücken</strong><p>Alles spielt im gleichen Takt. Neue Sounds steigen beim nächsten Takt ein.</p></li><li><strong>Einen Song bauen</strong><p>Merke dir Mischungen als Songteile. Unter „Mein Song“ wählst du einen Teil und singst deine Stimme dazu. Ordne die Teile mit den Pfeilen an.</p></li></ol><p class="storage-help">Deine Projekte bleiben in diesem Browser. Mit „Projekt sichern“ kannst du sie aufheben oder auf einem anderen Gerät laden. „Exportieren“ speichert Beat und Stimme zusammen als WAV-Datei. Nutze Kopfhörer beim Einsingen. Das Tempo bleibt nach einer Aufnahme fest.</p><button class="play-button" data-action="close-help">Los geht’s ${icon('arrow')}</button></dialog>
   </div>`;
   if (!document.querySelector('#toast')) {
     const toast=document.createElement('div'); toast.id='toast'; toast.setAttribute('role','status'); toast.setAttribute('aria-live','polite'); toast.hidden=true; document.body.append(toast);
@@ -162,6 +183,14 @@ function render(): void {
   updateSaveLabel();
   const parts = document.querySelector('.song-parts');
   if (parts) parts.scrollLeft=previousScroll;
+  const timeline = document.querySelector('.vocal-scroll');
+  if (timeline) {
+    timeline.scrollLeft = vocalScroll;
+    if (!oldTimeline || oldSelection !== selectedVocalId || recording?.phase === 'preparing') {
+      const selected = timeline.querySelector<HTMLElement>('.vocal-part-heading.chosen');
+      if (selected) timeline.scrollLeft = Math.max(0, selected.offsetLeft - 104);
+    }
+  }
   if (focused) app.querySelector<HTMLElement>(`[data-focus="${CSS.escape(focused)}"]`)?.focus({ preventScroll:true });
   lastPosition='';
   updatePosition();
@@ -182,23 +211,33 @@ function updatePosition(): void {
   document.querySelectorAll<HTMLElement>('.beat-lights i').forEach((light,index)=>light.classList.toggle('lit',position?.beat===index));
   const bar=document.querySelector('#bar-label');
   if (bar) bar.textContent=`TAKT ${String(position ? audio.mode==='song'?position.bar+1:position.bar%4+1 : 1).padStart(2,'0')}`;
+  const playingPartId=recording?.partId??previewPartId??project().song[position?.part??-1]?.id;
+  const playingPart=project().song.find(part=>part.id===playingPartId);
   const status=document.querySelector('#playback-status');
-  if (status) status.textContent=busy?'Deine Sounds werden vorbereitet.':position?.pending?'Deine Änderung kommt im nächsten Takt.':audio.mode==='song'?`Jetzt: ${project().song[position?.part??0]?.name??'Dein Song'}`:position?'Dein Beat läuft. Probier einen anderen Sound.':'Such dir Sounds aus. Dann drück Start.';
-  document.querySelectorAll('.song-part').forEach((part,index)=>part.classList.toggle('is-playing',position?.part===index));
+  if (status) status.textContent=busy?'Deine Sounds werden vorbereitet.':position?.pending?'Deine Änderung kommt im nächsten Takt.':audio.mode==='song'?`Jetzt: ${playingPart?.name??'Dein Song'}`:position?'Dein Beat läuft. Probier einen anderen Sound.':'Such dir Sounds aus. Dann drück Start.';
+  document.querySelectorAll<HTMLElement>('.song-part').forEach(part=>part.classList.toggle('is-playing',Boolean(position)&&part.dataset.part===playingPartId));
+  document.querySelectorAll<HTMLElement>('[data-vocal-part]').forEach(part=>part.classList.toggle('is-playing',Boolean(position)&&part.dataset.vocalPart===playingPartId));
   document.querySelector('.play-button')?.classList.toggle('is-playing',audio.mode!==null);
 }
 
-async function play(mode: 'loops'|'song'): Promise<void> {
-  if (busy) return;
+async function play(mode: 'loops'|'song', partId: string | null = null): Promise<void> {
+  if (busy||fileBusy||recording) return;
   if (audio.mode===mode || (mode==='loops'&&audio.mode)) { audio.stop(); render(); return; }
   if (mode==='song'&&!project().song.length) return;
+  const generation=++playGeneration;
   busy=true; render();
   try {
-    await audio.start(clone(project()),mode);
+    await audio.unlock();
+    const snapshot=clone(project());
+    if (partId) snapshot.song=snapshot.song.filter(part=>part.id===partId);
+    previewPartId=partId;
+    const library=mode==='song'?await takes.forProject(snapshot):{};
+    if (generation!==playGeneration) return;
+    await audio.start(snapshot,mode,library);
   } catch (error) {
     audio.stop();
     announce(error instanceof Error?error.message:'Die Musik konnte nicht starten. Bitte versuche es nochmal.',true);
-  } finally { busy=false; render(); }
+  } finally { if(generation===playGeneration) {busy=false; render();} }
 }
 
 function download(blob: Blob,filename: string): void {
@@ -215,7 +254,7 @@ async function exportWav(): Promise<void> {
   exporting=true; render();
   announce('Dein Song wird als Audiodatei gebaut.');
   try {
-    const wav=await bank.getWav(snapshot);
+    const wav=await bank.getWav(snapshot,await takes.forProject(snapshot));
     download(new Blob([wav],{ type:'audio/wav' }),`${filename(snapshot.name)}.wav`);
     announce('Deine WAV-Datei ist fertig. Schau in deine Downloads.');
   } catch { announce('Der Export hat nicht geklappt. Bitte versuche es nochmal.',true); }
@@ -228,7 +267,12 @@ app.addEventListener('click',event=>{
   const action=button.dataset.action;
   const id=button.dataset.id;
   const p=project();
-  if (action==='play') { void play('loops'); return; }
+  if (action==='cancel-record') { cancelRecording(); return; }
+  if (action==='record') { if (recording) finishRecording(); else void recordVocal(); return; }
+  if (action==='play'&&recording) { finishRecording(); return; }
+  if (recording||fileBusy) return;
+  if (action==='play') { void play(view); return; }
+  if (action==='preview-part') { void play('song',selectedVocalId); return; }
   if (action==='play-song') { void play('song'); return; }
   if (action==='export-wav') { void exportWav(); return; }
   if (action==='help') { document.querySelector<HTMLDialogElement>('#help-dialog')!.showModal(); return; }
@@ -239,6 +283,7 @@ app.addEventListener('click',event=>{
     if (pack===studio.currentPack) return;
     audio.stop(); editingId=null;
     mutate(()=>{studio.currentPack=pack;});
+    void refreshWaves();
     announce(`${PACKS[pack].name}: dein eigener Track mit eigenen Sounds.`);
     return;
   }
@@ -247,9 +292,15 @@ app.addEventListener('click',event=>{
     if (!previous) return;
     audio.stop(); studio=previous; editingId=null; save(); render(); announce('Letzte Änderung rückgängig.'); return;
   }
-  if (action==='save-project') { download(new Blob([JSON.stringify(p,null,2)],{type:'application/json'}),`${filename(p.name)}.bumm.json`); return; }
+  if (action==='save-project') { void saveProjectFile(); return; }
   if (action==='load-project') { document.querySelector<HTMLInputElement>('#project-file')!.click(); return; }
   if (locked()) return;
+  if (action==='select-vocal') { selectedVocalId=id!; render(); return; }
+  if (action==='remove-vocal') {
+    const part=p.song.find(part=>part.id===selectedVocalId);
+    if (part?.vocal) { mutate(()=>{part.vocal=null;}); announce('Aufnahme entfernt. Mit Rückgängig holst du sie zurück.'); }
+    return;
+  }
   if (action==='loop') {
     const loop=findLoop(id as LoopId);
     mutate(()=>{p.mix=toggleLoop(p.mix,loop.role,loop.id);},true); return;
@@ -258,14 +309,14 @@ app.addEventListener('click',event=>{
     const role=button.dataset.role as Role;
     mutate(()=>{p.mix.loops[role]=null;},true); return;
   }
-  if (action==='bpm-down'||action==='bpm-up') {
+  if ((action==='bpm-down'||action==='bpm-up')&&!hasVocals(p)) {
     mutate(()=>{p.bpm+=action==='bpm-down'?-1:1;}); return;
   }
   if (action==='finish-edit') { editingId=null; render(); return; }
   if (action==='add-part') {
     if (p.song.length>=MAX_PARTS||!activeCount(p.mix)) return;
     const newId=crypto.randomUUID();
-    mutate(()=>{p.song.push({id:newId,name:p.song.length===3?'Finale':`Teil ${p.song.length+1}`,bars:4,mix:clone(p.mix)});});
+    mutate(()=>{p.song.push({id:newId,name:p.song.length===3?'Finale':`Teil ${p.song.length+1}`,bars:4,mix:clone(p.mix),vocal:null});});
     document.querySelector('.song-parts')?.scrollTo({left:10000});
     announce('Deine Mischung ist jetzt ein neuer Songteil.'); return;
   }
@@ -295,12 +346,23 @@ app.addEventListener('click',event=>{
 
 app.addEventListener('focusin',event=>{
   const input=event.target as HTMLInputElement;
-  if (input.matches('[data-level],[data-name],#project-name')) editBaseline=clone(studio);
+  if (input.matches('[data-level],[data-name],[data-voice-control],#project-name')) editBaseline=clone(studio);
 });
 
 app.addEventListener('input',event=>{
   const input=event.target as HTMLInputElement;
   if (input.id==='master-volume') { masterVolume=Number(input.value); audio.setVolume(masterVolume/100); return; }
+  if (input.dataset.voiceControl&&!locked()) {
+    const part=project().song.find(part=>part.id===selectedVocalId);
+    if (input.dataset.voiceControl==='beat') project().beatLevel=Number(input.value)/100;
+    if (part?.vocal&&input.dataset.voiceControl==='volume') part.vocal.volume=Number(input.value)/100;
+    if (part?.vocal&&input.dataset.voiceControl==='timing') {
+      part.vocal.shiftMs=Number(input.value);
+      const output=document.querySelector('#timing-value');
+      if (output) output.textContent=`${part.vocal.shiftMs} ms`;
+    }
+    save(); return;
+  }
   if (input.dataset.level) {
     const role=input.dataset.level as Role;
     project().mix.levels[role]=Number(input.value)/100;
@@ -321,6 +383,7 @@ app.addEventListener('change',event=>{
   const input=event.target as HTMLInputElement;
   if (input.id==='project-file') { void importProject(input); return; }
   if (input.id==='bpm') {
+    if (hasVocals(project())||locked()) { input.value=String(project().bpm); return; }
     const bpm=Number(input.value);
     const pack=PACKS[project().pack];
     if (!Number.isInteger(bpm)||bpm<pack.minBpm||bpm>pack.maxBpm) { input.value=String(project().bpm); announce(`Das Tempo liegt hier zwischen ${pack.minBpm} und ${pack.maxBpm} BPM.`); return; }
@@ -329,10 +392,10 @@ app.addEventListener('change',event=>{
   }
   if (input.dataset.bars) {
     const part=project().song.find(part=>part.id===input.dataset.bars);
-    if (part) mutate(()=>{part.bars=Number(input.value) as 4|8;});
+    if (part&&!part.vocal&&!locked()) mutate(()=>{part.bars=Number(input.value) as 4|8;});
     return;
   }
-  if (input.matches('[data-level],[data-name],#project-name')) {
+  if (input.matches('[data-level],[data-name],[data-voice-control],#project-name')) {
     if (!input.value.trim()) input.value=input.id==='project-name'?project().name:project().song.find(part=>part.id===input.dataset.name)?.name??'';
     if (editBaseline&&JSON.stringify(editBaseline)!==JSON.stringify(studio)) {
       remember(editBaseline);
@@ -342,31 +405,131 @@ app.addEventListener('change',event=>{
   }
 });
 
+async function saveProjectFile(): Promise<void> {
+  if (fileBusy||recording) return;
+  const snapshot=clone(project());
+  fileBusy=true; render();
+  try {
+    const data=encodeProject(snapshot,await takes.forProject(snapshot));
+    download(new Blob([data],{type:'application/octet-stream'}),`${filename(snapshot.name)}.bumm`);
+    announce('Projektdatei mit allen Aufnahmen erstellt.');
+  } catch (error) { announce(error instanceof Error?error.message:'Das Projekt konnte nicht gesichert werden.',true); }
+  finally { fileBusy=false; render(); }
+}
+
 async function importProject(input: HTMLInputElement): Promise<void> {
   const file=input.files?.[0];
-  if (!file) return;
+  if (!file||recording||fileBusy) return;
+  fileBusy=true; audio.stop(); render();
   try {
-    if (file.size>250_000) throw new Error('Diese Datei ist zu groß für ein BUMM-Projekt.');
-    const value:unknown=JSON.parse(await file.text());
-    const pack=(value as {pack?:unknown})?.pack;
-    if ((pack!=='hiphop'&&pack!=='techno')||!validProject(value,pack)) throw new Error('Das ist keine passende BUMM-Projektdatei.');
-    audio.stop(); editingId=null;
-    mutate(()=>{studio.currentPack=pack;studio.projects[pack]=value;});
-    announce('Projekt geladen. Dein vorheriger Stand ist über Rückgängig erreichbar.');
+    if (file.size>MAX_PROJECT_BYTES) throw new Error('Diese Projektdatei ist zu groß.');
+    const decoded=decodeProject(await file.arrayBuffer());
+    const imported=remapImported(decoded.project,decoded.takes,()=>crypto.randomUUID());
+    await takes.putAll(imported.takes);
+    for (const take of imported.takes) waves.set(take.id,waveform(take));
+    editingId=null;
+    mutate(()=>{studio.currentPack=imported.project.pack;studio.projects[imported.project.pack]=imported.project;});
+    announce('Projekt samt Aufnahmen geladen. Dein vorheriger Stand bleibt über Rückgängig erreichbar.');
   } catch (error) { announce(error instanceof Error?error.message:'Diese Projektdatei konnte nicht geladen werden.',true); }
-  finally { input.value=''; }
+  finally { fileBusy=false; input.value=''; render(); }
 }
+
+async function refreshWaves(): Promise<void> {
+  const snapshot=project();
+  try {
+    const library=await takes.forProject(snapshot);
+    for (const take of Object.values(library)) if (!waves.has(take.id)) waves.set(take.id,waveform(take));
+    if (snapshot===project()&&!recording) render();
+  } catch (error) { if (snapshot===project()) announce(error instanceof Error?error.message:'Aufnahme fehlt.',true); }
+}
+
+async function recordVocal(): Promise<void> {
+  const part=project().song.find(part=>part.id===selectedVocalId);
+  if (!part||locked()) return;
+  const owner=project();
+  const generation=++recordGeneration;
+  audio.stop(); previewPartId=null;
+  recording={partId:part.id,phase:'preparing'};
+  view='song'; render();
+  let captured: Promise<Take> | undefined;
+  try {
+    const context=await audio.unlock();
+    if (generation!==recordGeneration) throw new RecordingCancelled();
+    await microphone.prepare(context);
+    if (generation!==recordGeneration) throw new RecordingCancelled();
+    const backing=clone(owner); backing.song=[clone(part)];
+    const started=await audio.start(backing,'song',{}, {recording:true,onScheduled:schedule=>{
+      if (generation!==recordGeneration) throw new RecordingCancelled();
+      recording={partId:part.id,phase:'count-in',schedule};
+      captured=microphone.capture(schedule.startTime,schedule.endTime);
+      void captured.catch(()=>{});
+      render();
+    }});
+    if (!started||!captured) throw new RecordingCancelled();
+    const take=await captured;
+    if (generation!==recordGeneration) throw new RecordingCancelled();
+    recording={partId:part.id,phase:'saving'}; audio.stop(); render();
+    await takes.putAll([take]);
+    if (generation!==recordGeneration) throw new RecordingCancelled();
+    waves.set(take.id,waveform(take));
+    recording=null;
+    mutate(()=>{part.vocal={takeId:take.id,volume:.9,shiftMs:0};});
+    announce(`Deine Stimme ist jetzt in „${part.name}“.`);
+  } catch (error) {
+    if (generation===recordGeneration&&!(error instanceof RecordingCancelled)) announce(microphoneError(error),true);
+  } finally {
+    if (generation===recordGeneration) { microphone.cancel();audio.stop();recording=null;render(); }
+  }
+}
+
+function cancelRecording(): void {
+  recordGeneration++; microphone.cancel(); audio.stop(); recording=null; render();
+  announce('Aufnahme abgebrochen. Deine vorige Aufnahme bleibt erhalten.');
+}
+
+function finishRecording(): void {
+  if (!recording) return;
+  if (recording.phase==='count-in'||recording.phase==='preparing') { cancelRecording(); return; }
+  if (recording.phase!=='recording') return;
+  recording.phase='finishing'; microphone.finish(); audio.stop(); render();
+}
+
+function updateRecording(): void {
+  if (!recording) return;
+  const {schedule}=recording;
+  const elapsed=schedule?audio.clockTime-schedule.startTime:0;
+  if (recording.phase==='count-in'&&elapsed>=0) { recording.phase='recording';render();return; }
+  const text=document.querySelector('#record-status');
+  const duration=schedule?schedule.endTime-schedule.startTime:0;
+  if (text) text.textContent=recording.phase==='preparing'?'Erlaube den Mikrofonzugriff. Dann geht es los.':recording.phase==='count-in'?`Einzählen: ${Math.max(1,Math.min(4,Math.floor((elapsed+schedule!.barDuration)/(schedule!.barDuration/4))+1))} von 4` :recording.phase==='recording'?`Jetzt singen! Noch ${Math.max(0,Math.ceil(duration-elapsed))} Sekunden.`:'Deine Aufnahme wird gespeichert.';
+  const progress=document.querySelector<HTMLElement>('#record-progress-fill');
+  if (progress) progress.style.width=`${Math.min(100,Math.max(0,elapsed/Math.max(1,duration)*100))}%`;
+}
+
+microphone.onLevel=peak=>{
+  const level=Math.min(100,Math.round(peak*250));
+  const meter=document.querySelector<HTMLElement>('#mic-level');
+  if (meter) meter.style.width=`${level}%`;
+  document.querySelector('.mic-meter')?.setAttribute('aria-valuenow',String(level));
+};
+microphone.onInterrupted=()=>{ if(recording) { cancelRecording(); announce('Das Mikrofon wurde unterbrochen. Bitte versuche es nochmal.',true); } };
 
 document.addEventListener('keydown',event=>{
   if ((event.target as HTMLElement).matches('input,select,textarea,button')||document.querySelector('dialog[open]')) return;
-  if (event.code==='Space') { event.preventDefault();void play('loops'); }
-  if ((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='z'&&!busy) {
+  if (event.code==='Space') { event.preventDefault(); if(recording) finishRecording(); else void play(view); }
+  if (event.code==='Escape'&&recording) { event.preventDefault();cancelRecording(); }
+  if ((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='z'&&!busy&&!recording) {
     event.preventDefault();document.querySelector<HTMLButtonElement>('[data-action="undo"]')?.click();
   }
 });
 document.addEventListener('visibilitychange',()=>{
-  if (document.hidden&&(audio.mode||busy)) { audio.stop();render(); }
+  if (document.hidden&&recording) cancelRecording();
+  else if (document.hidden&&(audio.mode||busy)) { playGeneration++;busy=false;audio.stop();render(); }
 });
-audio.onStop=()=>render();
+audio.onStop=reason=>{
+  if(reason==='interrupted'&&recording) { cancelRecording();announce('Audio wurde unterbrochen. Bitte starte die Aufnahme nochmal.',true); }
+  else render();
+};
 render();
-window.setInterval(updatePosition,100);
+void refreshWaves();
+window.setInterval(()=>{updatePosition();updateRecording();},100);

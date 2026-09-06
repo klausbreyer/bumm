@@ -2,12 +2,24 @@
 
 A local beat studio for children aged 6 to 9, with the interface aimed at age 9. Built from the selected loop-pad design. German interface, touch controls, Hip-Hop and Techno soundsets.
 
+Website: [klausbreyer.github.io/bumm](https://klausbreyer.github.io/bumm/).
+
 ```sh
 bun install
 bun run dev
 ```
 
-Open http://127.0.0.1:4176. `bun run build` checks TypeScript and builds the static app. `bun test` checks the song model and audio rendering.
+Open http://127.0.0.1:4176. `bun run build` checks TypeScript and builds the static app. `bun run test` checks the song model and audio rendering.
+
+`bun run test:browser` builds the app and runs the recorded-part editing flow against the production site at `http://127.0.0.1:4177/bumm/`, in laptop and phone viewports. It checks resizing, real Web Audio playback, undo, persistence and exported audio without microphone access. Playwright's Chromium must be installed. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to use an existing Chromium binary, or `PLAYWRIGHT_BASE_URL` to test an already hosted build.
+
+## Hosting
+
+GitHub Pages uses the [Actions deployment workflow](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages) in `.github/workflows/pages.yml`. Pushes and pull requests run unit tests and browser tests. A successful push to `main` publishes the tested `dist` artifact. The build uses the `/bumm/` base path for scripts, styles, fonts and audio workers; local development stays at `/`.
+
+For the initial release before the first PR is merged, `PAGES_BOOTSTRAP_SHA` can authorize one exact commit for deployment. Remove this repository variable after that release. The `github-pages` environment restricts deployment branches.
+
+## Using the studio
 
 The app plays original synthesized loops, switches sounds at bar boundaries, saves mixes as song parts, and exports stereo WAV files. Song parts can be edited, copied, reordered, renamed and removed. Changes can be undone. Each genre has a separate project.
 
@@ -15,7 +27,7 @@ In **Mein Song**, select a part and press **Aufnehmen**. Grant microphone access
 
 Audio is recorded as mono PCM through an AudioWorklet and stored in IndexedDB. Metadata is stored under `bumm.studio.v2`; existing v1 projects migrate on load. **Projekt sichern** downloads a `.bumm` file containing the metadata and lossless audio. **Projekt laden** also accepts older beat-only JSON files. WAV export mixes beats and vocals into one stereo file. Recordings never leave the device unless the user downloads and shares a file. Old takes remain in the local audio store so undo can restore them.
 
-The speaker slider changes listening volume. Channel and voice sliders change the saved mix and exported song. Playback stops and an active recording is cancelled when the page is hidden. Tempo is locked while the project contains vocals; the length of a recorded part is also fixed. Remove the part's recording to change its length. Microphone audio is never played through the speakers during recording. Use headphones to keep the backing track out of the microphone.
+The speaker slider changes listening volume. Channel and voice sliders change the saved mix and exported song. Playback stops and an active recording is cancelled when the page is hidden. Tempo is locked while the project contains vocals. Recorded parts can switch between four and eight bars while stopped. Shortening a part trims playback at its boundary and keeps the full recording, including in saved project files. Extending it again restores the available audio; it does not repeat the voice. Microphone audio is never played through the speakers during recording. Use headphones to keep the backing track out of the microphone.
 
 Recording requires HTTPS or localhost and a browser with microphone and AudioWorklet support. The recorder uses the audio clock and compensates for device latency estimates. Per-take timing can be adjusted by up to 250 ms in either direction. These estimates do not replace testing with real hardware, especially wireless audio devices. Real iPhone/iPad microphone behavior has not yet been verified. There are no accounts, analytics, network sound downloads or server database connections.
 

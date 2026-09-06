@@ -2,6 +2,7 @@ import type { LoopBank } from '../music/render';
 import type { Project } from '../music/project';
 import type { PackId } from '../music/catalog';
 import type { RenderRequest } from './render-worker';
+import type { TakeLibrary } from '../music/vocals';
 
 export class BankClient {
   private worker = new Worker(new URL('./render-worker.ts',import.meta.url),{ type:'module' });
@@ -34,5 +35,5 @@ export class BankClient {
   }
 
   getBank(pack: PackId,bpm: number): Promise<LoopBank> { return this.request({ type:'bank',pack,bpm }); }
-  getWav(project: Project): Promise<ArrayBuffer> { return this.request({ type:'wav',project }); }
+  getWav(project: Project, takes: TakeLibrary = {}): Promise<ArrayBuffer> { return this.request({ type:'wav',project,takes }); }
 }

@@ -5,13 +5,25 @@ A local beat studio for children aged 6 to 9, with the interface aimed at age 9.
 Website: [klausbreyer.github.io/bumm](https://klausbreyer.github.io/bumm/).
 
 ```sh
-bun install
-bun run dev
+make start
 ```
 
-Open http://127.0.0.1:4176. `bun run build` checks TypeScript and builds the static app. `bun run test` checks the song model and audio rendering.
+`make start` installs dependencies and opens http://127.0.0.1:4176 in your
+browser. Stop the server with Ctrl+C. Use `make start PORT=4181` for another
+port, or `make start OPEN=` to leave the browser closed. An occupied port stops
+startup with an error. `bun run dev` starts the server without installing
+dependencies or opening the browser.
 
-`bun run test:browser` builds the app and runs the recorded-part editing flow against the production site at `http://127.0.0.1:4177/bumm/`, in laptop and phone viewports. It checks resizing, real Web Audio playback, undo, persistence and exported audio without microphone access. Playwright's Chromium must be installed. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to use an existing Chromium binary, or `PLAYWRIGHT_BASE_URL` to test an already hosted build.
+`bun run build` checks TypeScript and builds the static app. `bun run test`
+checks the song model and audio rendering.
+
+`bun run test:browser` builds the app and tests a local production build at
+`http://127.0.0.1:4177/bumm/`, in laptop and phone viewports. It covers the song
+view, beat editing, independent vocals, seeking, undo, persistence and WAV
+export. Recording tests use generated audio, not a physical microphone.
+Playwright's Chromium must be installed. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE`
+to use an existing Chromium binary. `PLAYWRIGHT_BASE_URL` selects an existing
+server instead of starting the local preview.
 
 ## Hosting
 
@@ -21,15 +33,78 @@ For the initial release before the first PR is merged, `PAGES_BOOTSTRAP_SHA` can
 
 ## Using the studio
 
-The app plays original synthesized loops, switches sounds at bar boundaries, saves mixes as song parts, and exports stereo WAV files. Song parts can be edited, copied, reordered, renamed and removed. Changes can be undone. Each genre has a separate project.
+The studio opens with **Dein Song**. Beats appear in order above an independent
+voice track. Select a beat to change its sounds, name, length or position in the
+panel on the right. The beat editor and recording controls share this panel.
+Only one opens at a time. The timeline stays visible while the panel scrolls. Beats can be copied or removed. **Beat anhängen**
+adds a beat with the current mix. **Fertig** closes the editor. Track and beat
+names have a visible border and pencil icon; click the field to rename them.
 
-In **Mein Song**, select a part and press **Aufnehmen**. Grant microphone access, wait for four count-in beats, then sing or rap along. Recording stops at the part boundary or when **Aufnahme beenden** is pressed. **Abbrechen** discards the attempt and preserves the previous take. A waveform shows where the recorded voice belongs. Copying and moving parts includes their vocals. Replacing or removing a take can be undone.
+**Song anhören** plays the arrangement. A white line shows the current position
+across both tracks. While stopped, use the ruler to choose a playback or
+recording position. The arrow beside the clock returns to the start. The
+**Beat anhören** button in the editor previews its mix in a loop.
 
-Audio is recorded as mono PCM through an AudioWorklet and stored in IndexedDB. Metadata is stored under `bumm.studio.v2`; existing v1 projects migrate on load. **Projekt sichern** downloads a `.bumm` file containing the metadata and lossless audio. **Projekt laden** also accepts older beat-only JSON files. WAV export mixes beats and vocals into one stereo file. Recordings never leave the device unless the user downloads and shares a file. Old takes remain in the local audio store so undo can restore them.
+**Stimme aufnehmen**, beside **Beat anhängen**, opens the recording panel.
+This button stays visible when the track already contains recordings. Select
+a voice clip to edit its mix, adjust its timing or delete it. Microphone and
+headphone controls appear only when preparing a recording.
+Choose a microphone from the list. **Mikrofone freigeben** requests permission
+so BUMM can show device names. It releases the temporary microphone stream
+without recording. During capture, **Verwendet** shows the active track's name.
+The picker stays locked until recording ends. A missing selected microphone
+causes an error instead of switching to another device. Device changes update
+the list. **Systemstandard** follows the browser's default input.
 
-The speaker slider changes listening volume. Channel and voice sliders change the saved mix and exported song. Playback stops and an active recording is cancelled when the page is hidden. Tempo is locked while the project contains vocals. Recorded parts can switch between four and eight bars while stopped. Shortening a part trims playback at its boundary and keeps the full recording, including in saved project files. Extending it again restores the available audio; it does not repeat the voice. Microphone audio is never played through the speakers during recording. Use headphones to keep the backing track out of the microphone.
+Choose whether you wear headphones before recording. **Nein** is the default:
+backing audio and count-in clicks stay silent, while the count and playhead
+remain visible. With **Ja**, the beat and count-in play through your selected
+audio output. This choice does not change the saved mix or WAV export.
+Microphone audio never plays through the speakers during recording.
 
-Recording requires HTTPS or localhost and a browser with microphone and AudioWorklet support. The recorder uses the audio clock and compensates for device latency estimates. Per-take timing can be adjusted by up to 250 ms in either direction. These estimates do not replace testing with real hardware, especially wireless audio devices. Real iPhone/iPad microphone behavior has not yet been verified. There are no accounts, analytics, network sound downloads or server database connections.
+Press **Aufnahme starten**, grant microphone access and wait for four count-in
+beats. Sing or rap, then press **Aufnahme beenden**. Each recording can last up
+to two minutes. It can cross beat boundaries, continue past the beats or stand
+alone without beats. A project can contain eight recordings. Each clip has its
+own time position. Moving, copying, shortening or deleting beats leaves vocals
+in place.
+
+Select an existing recording and press **Neu aufnehmen** to prepare a replacement.
+Then press **Aufnahme starten**. **Zurück** leaves setup; **Abbrechen** cancels
+capture. Both preserve the previous take. **Aufnahme löschen** removes the
+selected clip and closes the panel. Undo restores it. To create a separate
+clip at the cursor, use **Stimme aufnehmen** beside **Beat anhängen**.
+Overlapping clips play together. Use **Stimme & Beat mischen** in the recording panel to adjust the selected
+voice clip and its backing beat. The beat setting applies only from that
+clip’s start to its end. Overlapping clips use the quieter beat setting.
+Outside these sections, the original project mix remains unchanged. Older
+projects retain their mix until you adjust a section. Position, playback length, timing and removal stay in the recording
+panel. Changes can be undone. Shortening a
+voice clip preserves its full audio, including in saved project files.
+
+Recordings use mono PCM in IndexedDB. Metadata lives under `bumm.studio.v3`.
+Existing v1 and v2 projects migrate on load. Older part-bound vocals retain
+their original start times, playback windows, volume and timing adjustment.
+Their full recorded audio remains available. Each genre has a separate project.
+
+The top toolbar contains project files, save status, listening volume,
+WAV export and help. **Sichern** downloads a `.bumm` file with metadata and
+lossless audio. **Laden**
+also accepts older project files. **Song herunterladen** exports beats and
+vocals as stereo WAV. Recordings never leave the device unless the user
+downloads and shares a file. Old takes remain in storage for undo.
+
+The speaker slider changes listening volume. Channel and voice sliders change
+the saved mix and exported song. Playback stops and an active recording is
+cancelled when the page is hidden. Tempo stays locked while vocals exist.
+
+Recording requires HTTPS or localhost, microphone support and AudioWorklet.
+Timing uses the audio clock. With headphones, latency compensation includes
+input and output estimates. Without headphones, it uses the input estimate.
+Each take can be adjusted by up to 250 ms in either direction. These estimates
+do not replace tests with real hardware, especially wireless audio devices.
+Real iPhone/iPad microphone behavior has not yet been verified. There are no
+accounts, analytics, network sound downloads or server database connections.
 
 ## Structure
 

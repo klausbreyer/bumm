@@ -21,11 +21,11 @@ function deferred<T>() {
 }
 
 function stream() {
-  const track = { stopped: false, onended: null, stop() { this.stopped = true; }, getSettings: () => ({ latency: .01 }) };
+  const track = { stopped: false, onended: null, stop() { this.stopped = true; }, label: 'USB microphone', getSettings: () => ({ latency: .01, deviceId: 'usb' }) };
   return { track, getTracks: () => [track], getAudioTracks: () => [track] };
 }
 
-function harness(getUserMedia: () => Promise<ReturnType<typeof stream>>, addModule: () => Promise<void> = async () => {}) {
+function harness(getUserMedia: (constraints: MediaStreamConstraints) => Promise<ReturnType<typeof stream>>, addModule: () => Promise<void> = async () => {}) {
   const graphNode = () => ({ connect(next: unknown) { return next; }, disconnect() {} });
   const worklets: { port: { onmessage: (event: unknown) => void; postMessage: (message: unknown) => void; close: () => void } }[] = [];
   const environment = createContext({ Float32Array, crypto, DOMException, module: { exports: {} },
@@ -94,4 +94,25 @@ test('finishing captures audio and releases the microphone before saving', async
   expect(take.samples.length).toBe(8000);
   expect(take.samples[100]).toBeCloseTo(.85);
   expect(input.track.stopped).toBe(true);
+});
+
+
+test('a selected microphone uses an exact device constraint and reports the actual active track', async () => {
+  let requested: MediaStreamConstraints | undefined;
+  const input = stream();
+  const { recorder, context } = harness(async constraints => { requested = constraints; return input; });
+  await recorder.prepare(context, false, 'usb');
+  expect(requested?.audio).toMatchObject({ deviceId: { exact: 'usb' } });
+  expect(recorder.activeInput).toEqual({ id: 'usb', label: 'USB microphone' });
+  recorder.cancel();
+  expect(recorder.activeInput).toBeNull();
+  expect(input.track.stopped).toBe(true);
+});
+
+test('a missing selected device fails without silently falling back to the default', async () => {
+  let requests = 0;
+  const { recorder, context } = harness(async () => { requests++; throw new DOMException('Gone', 'OverconstrainedError'); });
+  await expect(recorder.prepare(context, false, 'missing')).rejects.toThrow();
+  expect(requests).toBe(1);
+  expect(recorder.activeInput).toBeNull();
 });

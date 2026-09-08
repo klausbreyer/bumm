@@ -1,10 +1,12 @@
+import { MAX_TAKE_SECONDS } from './project';
+
 /** Capture an exact audio-clock window, independent of callback/block sizes. */
 export class CaptureWindow {
   private samples: Float32Array<ArrayBuffer>;
   private end: number;
 
   constructor(readonly start: number, end: number) {
-    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end - start > 192000 * 30) throw new Error('Invalid capture window');
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end - start > 192000 * MAX_TAKE_SECONDS) throw new Error('Invalid capture window');
     this.end = end;
     this.samples = new Float32Array(end - start);
   }

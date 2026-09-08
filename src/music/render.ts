@@ -3,7 +3,7 @@ import type { Loop, LoopId, PackId } from './catalog';
 import { ROLES } from './catalog';
 import { totalBars } from './project';
 import type { Project } from './project';
-import { beatGain, requireTakes, VOCAL_GAIN, vocalSample } from './vocals';
+import { beatLevels, requireTakes, VOCAL_GAIN, vocalSample, timelinePlacement } from './vocals';
 import type { TakeLibrary } from './vocals';
 
 export const SAMPLE_RATE = 44100;
@@ -191,8 +191,9 @@ export function renderBank(pack: PackId, bpm: number, sampleRate = SAMPLE_RATE):
 /** Write PCM directly into the WAV buffer to bound memory use on mobile devices. */
 export function renderWav(project: Project, bank: LoopBank, takes: TakeLibrary = {}): ArrayBuffer {
   requireTakes(project, takes);
-  const backingGain = beatGain(project);
-  const frames = totalBars(project)*bank.frames/4;
+  const levels = beatLevels(project);
+  let levelIndex = 0;
+  const frames = Math.max(totalBars(project)*bank.frames/4, ...project.vocals.map(clip => (clip.startSeconds + clip.durationSeconds) * bank.sampleRate));
   const frameCount = Math.round(frames);
   const output = new ArrayBuffer(44+frameCount*4);
   const view = new DataView(output);
@@ -201,22 +202,42 @@ export function renderWav(project: Project, bank: LoopBank, takes: TakeLibrary =
   view.setUint32(16,16,true); view.setUint16(20,1,true); view.setUint16(22,2,true);
   view.setUint32(24,bank.sampleRate,true); view.setUint32(28,bank.sampleRate*4,true);
   view.setUint16(32,4,true); view.setUint16(34,16,true); text(36,'data'); view.setUint32(40,frameCount*4,true);
-  let offset = 0;
-  for (const part of project.song) {
-    const partFrames = part.bars*bank.frames/4;
-    const clip = part.vocal;
-    const take = clip ? takes[clip.takeId] : null;
-    const tracks = ROLES.flatMap(role => part.mix.loops[role] ? [{ samples:bank.loops[part.mix.loops[role]!], gain:part.mix.levels[role] }] : []);
-    for (let i=0;i<partFrames;i++) {
-      let left = 0; let right = 0;
-      const position = i%bank.frames;
-      for (const track of tracks) { left += track.samples.left[position]*track.gain; right += track.samples.right[position]*track.gain; }
-      const fade = Math.min(1,i/(bank.sampleRate*.006),(partFrames-i-1)/(bank.sampleRate*.006));
-      const vocal = take && clip ? vocalSample(take, i/bank.sampleRate - clip.shiftMs/1000) * clip.volume * VOCAL_GAIN : 0;
-      view.setInt16(44+(offset+i)*4,Math.round(Math.max(-1,Math.min(1,(left*MASTER_GAIN*backingGain+vocal)*fade))*32767),true);
-      view.setInt16(46+(offset+i)*4,Math.round(Math.max(-1,Math.min(1,(right*MASTER_GAIN*backingGain+vocal)*fade))*32767),true);
+  let endBar = 0;
+  const parts = project.song.map(part => {
+    const start = Math.round(endBar * bank.frames / 4);
+    endBar += part.bars;
+    return { start, end: Math.round(endBar * bank.frames / 4), tracks: ROLES.flatMap(role => part.mix.loops[role]
+      ? [{ samples: bank.loops[part.mix.loops[role]!], gain: part.mix.levels[role] }] : []) };
+  });
+  const voices = project.vocals.map(clip => ({ clip, take: takes[clip.takeId], placement: timelinePlacement(clip, takes[clip.takeId]) }));
+  let partIndex = 0;
+  for (let frame = 0; frame < frameCount; frame++) {
+    while (parts[partIndex] && frame >= parts[partIndex].end) partIndex++;
+    const part = parts[partIndex];
+    while (levels[levelIndex + 1] && frame / bank.sampleRate >= levels[levelIndex + 1].start) levelIndex++;
+    const backingGain = levels[levelIndex].gain;
+    let left = 0; let right = 0;
+    if (part) {
+      const relative = frame - part.start;
+      const position = relative % bank.frames;
+      const fade = Math.min(1, relative / (bank.sampleRate * .006), (part.end - frame - 1) / (bank.sampleRate * .006));
+      for (const track of part.tracks) {
+        left += track.samples.left[position] * track.gain;
+        right += track.samples.right[position] * track.gain;
+      }
+      left *= MASTER_GAIN * backingGain * fade;
+      right *= MASTER_GAIN * backingGain * fade;
     }
-    offset += partFrames;
+    for (const { clip, take, placement } of voices) {
+      const elapsed = frame / bank.sampleRate - placement.start;
+      if (elapsed < 0 || elapsed >= placement.duration) continue;
+      const fadeSeconds = Math.min(.005, placement.duration / 2);
+      const fade = Math.min(1, elapsed / fadeSeconds, (placement.duration - elapsed) / fadeSeconds);
+      const voice = vocalSample(take, placement.offset + elapsed) * clip.volume * VOCAL_GAIN * fade;
+      left += voice; right += voice;
+    }
+    view.setInt16(44 + frame * 4, Math.round(Math.max(-1, Math.min(1, left)) * 32767), true);
+    view.setInt16(46 + frame * 4, Math.round(Math.max(-1, Math.min(1, right)) * 32767), true);
   }
   return output;
 }

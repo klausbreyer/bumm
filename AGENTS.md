@@ -29,13 +29,19 @@ spinners. They cost battery and frames.
 Keep controls obvious, touch targets usable and German copy short. A wide
 screen gives the same studio more room. Judge a UI change on the phone first.
 Do not add configuration switches to compensate for confusing behavior.
+Keep the timeline visible on laptop and iPad screens. Beat editing and
+recording share one panel, with its own scroll area. Do not stack editors
+below the timeline. Keep the recording entry visible even when voice clips
+already exist. Voice and backing levels belong to the selected recording
+section, not to the top toolbar.
 
 ### 4. A recording must survive an edit
 
 Metadata lives in localStorage and recorded audio lives in IndexedDB. Project
 files contain both. Keep undo, persistence, import, export and playback aligned.
-Shortening a part trims playback but keeps the full recording. Extending it
-restores available audio without repeating the voice.
+Voice clips have their own time positions and playback windows. Moving or
+shortening beats must not move or trim vocals. Shortening a voice clip keeps
+the full recording, so extending it can restore available audio.
 
 ### 5. Audio behavior must agree
 
@@ -75,6 +81,8 @@ Use this language in code, in the UI and when talking to me.
 - **project** means the saved studio state for one genre.
 - **song part** means one arranged section of the song.
 - **take** means one recorded vocal performance stored as audio in IndexedDB.
+- **voice clip** means a take placed at a time position on the independent
+  voice track. Its playback window does not depend on a song part.
 - **project file** means a `.bumm` bundle with metadata and lossless audio.
 - **WAV export** means the stereo audio file containing beats and vocals.
 
@@ -120,7 +128,10 @@ Before you call a behavior change done, check the applicable paths.
 
 - `bun install` installs dependencies. Use `bun install --frozen-lockfile` when
   verifying the committed dependency set.
-- `bun run dev` starts Vite at `http://127.0.0.1:4176`.
+- `make start` installs dependencies, starts Vite at `http://127.0.0.1:4176`
+  and opens the browser. That port is Klaus's. For agent checks, use a free
+  port with `make start PORT=<port> OPEN=` and leave the browser closed unless
+  authorized. `bun run dev` starts only Vite.
 - `bun run build` checks TypeScript and creates the static build in `dist/`.
 - `bun run preview` serves that build on port 4176.
 - Development uses `/`. Builds and previews use `/bumm/`, including workers,

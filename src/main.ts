@@ -7,34 +7,44 @@ import '@fontsource/barlow-condensed/latin-800.css';
 import './style.css';
 import { PACKS, ROLES, ROLE_NAMES, findLoop } from './music/catalog';
 import type { Loop, LoopId, PackId, Role } from './music/catalog';
-import { MAX_PARTS, activeCount, clone, durationSeconds, makeStudio, parseStudio, toggleLoop, hasVocals } from './music/project';
-import type { Mix, Project, Studio } from './music/project';
+import { MAX_PARTS, MAX_VOCALS, MAX_TAKE_SECONDS, MAX_START_SECONDS, activeCount, clone, durationSeconds, makeStudio, parseStudio, toggleLoop, hasVocals } from './music/project';
+import type { Project, Studio } from './music/project';
 import { BankClient } from './audio/bank-client';
 import { BrowserEngine } from './audio/browser-engine';
+import { listMicrophones, requestMicrophones } from './audio/microphone-inputs';
+import type { MicrophoneInput } from './audio/microphone-inputs';
 import { MicrophoneRecorder, microphoneError, RecordingCancelled } from './audio/microphone-recorder';
 import { TakeStore } from './storage/takes';
 import { decodeProject, encodeProject, MAX_PROJECT_BYTES, remapImported } from './storage/project-file';
 import { waveform } from './music/vocals';
 import type { Take } from './music/vocals';
-import { vocalWorkspace } from './ui/vocal-workspace';
-import type { RecordingSession } from './ui/vocal-workspace';
+import { vocalWorkspace, recordingPanel } from './ui/vocal-workspace';
+import type { RecordingSession, WavePreview } from './ui/vocal-workspace';
 
-const STORAGE_KEY = 'bumm.studio.v2';
+const STORAGE_KEY = 'bumm.studio.v3';
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const bank = new BankClient();
 const audio = new BrowserEngine(bank);
 const takes = new TakeStore();
 const microphone = new MicrophoneRecorder();
-const waves = new Map<string, number[]>();
-let selectedVocalId: string | null = 'hook';
+const waves = new Map<string, WavePreview>();
+let selectedVocalId: string | null = null;
+let voiceSetup = true;
+let cursor = 0;
+let headphones = false;
+let panel: 'beat' | 'voice' | null = null;
+let microphoneChoices: MicrophoneInput[] = [];
+let selectedMicrophone = '';
+let microphonesReady = false;
+let microphoneBusy = false;
+let microphoneErrorText = '';
+let deviceRefresh = 0;
 let recording: RecordingSession | null = null;
 let recordGeneration = 0;
 let playGeneration = 0;
 let fileBusy = false;
-let previewPartId: string | null = null;
 let studio = makeStudio();
 let saveState: 'saved'|'unavailable'|'invalid' = 'saved';
-let view: 'loops'|'song' = 'loops';
 let editingId: string | null = null;
 let busy = false;
 let exporting = false;
@@ -43,9 +53,10 @@ let history: Studio[] = [];
 let editBaseline: Studio | null = null;
 let toastTimer = 0;
 let lastPosition = '';
+let positionTimer: number | undefined;
 
 try {
-  const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem('bumm.studio.v1');
+  const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem('bumm.studio.v2') ?? localStorage.getItem('bumm.studio.v1');
   if (raw) {
     const saved = parseStudio(raw);
     if (saved) studio = saved;
@@ -57,7 +68,7 @@ function project(): Project { return studio.projects[studio.currentPack]; }
 function esc(value: string): string { return value.replace(/[&<>"']/g,char => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[char]!); }
 function disabled(value: boolean): string { return value ? 'disabled' : ''; }
 function time(seconds: number): string { const rounded=Math.round(seconds); return `${Math.floor(rounded/60)}:${String(rounded%60).padStart(2,'0')}`; }
-function locked(): boolean { return busy || fileBusy || recording !== null || audio.mode==='song'; }
+function locked(): boolean { return busy || fileBusy || microphoneBusy || recording !== null || audio.mode==='song'; }
 function save(): void {
   try { localStorage.setItem(STORAGE_KEY,JSON.stringify(studio)); saveState='saved'; }
   catch { saveState='unavailable'; }
@@ -132,67 +143,87 @@ function mixer(): string {
       const id = project().mix.loops[role];
       return `<div class="mix-track role-${role} ${id?'':'empty'}"><span class="track-marker"></span><div class="track-label"><strong>${id?esc(findLoop(id).name):ROLE_NAMES[role]}</strong><input type="range" aria-label="${ROLE_NAMES[role]} Lautstärke" min="0" max="100" value="${Math.round(project().mix.levels[role]*100)}" data-level="${role}" data-focus="level-${role}" ${disabled(!id||locked())}></div><button class="icon-button" type="button" data-action="mute" data-role="${role}" data-focus="mute-${role}" aria-label="${ROLE_NAMES[role]} entfernen" ${disabled(!id||locked())}>${icon('close')}</button></div>`;
     }).join('')}</div>
-    <button class="save-part" data-action="add-part" ${disabled(locked()||project().song.length>=MAX_PARTS||activeCount(project().mix)===0)}>${icon('plus')} Als Songteil merken</button>
+
   </aside>`;
 }
 
-function partTracks(mix: Mix): string {
-  return `<span class="mini-tracks" aria-hidden="true">${ROLES.map(role=>`<i class="role-${role} ${mix.loops[role]?'filled':''}"></i>`).join('')}</span>`;
+function microphonePicker(): string {
+  const active = microphone.activeInput;
+  const selected = microphoneChoices.find(device => device.id === selectedMicrophone);
+  const missing = Boolean(selectedMicrophone && !selected);
+  return `<div class="microphone-picker"><label for="microphone-input">Mikrofon</label><div class="microphone-select"><select id="microphone-input" data-focus="microphone-input" ${disabled(locked())}><option value="">Systemstandard</option>${missing ? `<option value="${esc(selectedMicrophone)}" selected>Gewähltes Mikrofon nicht verfügbar</option>` : ''}${microphoneChoices.map(device => `<option value="${esc(device.id)}" ${device.id===selectedMicrophone?'selected':''}>${esc(device.label)}</option>`).join('')}</select><button class="icon-button" data-action="refresh-microphones" aria-label="Mikrofone aktualisieren" ${disabled(locked())}>↻</button></div>${!microphonesReady?`<button class="action-button" data-action="allow-microphones" ${disabled(locked())}>${microphoneBusy?'Mikrofone werden geladen…':'Mikrofone freigeben'}</button>`:''}<p id="active-microphone" role="status">${active ? `Verwendet: ${esc(active.label)}` : selected ? `Ausgewählt: ${esc(selected.label)}` : 'Systemstandard. Der Gerätename erscheint bei der Aufnahme.'}</p>${missing?'<p class="microphone-error">Wähle ein verfügbares Mikrofon.</p>':''}${microphoneErrorText?`<p class="microphone-error" role="alert">${esc(microphoneErrorText)}</p>`:''}</div>`;
 }
 
-function arranger(): string {
+async function refreshMicrophones(requestPermission = false): Promise<void> {
+  const media = navigator.mediaDevices;
+  if (!media?.enumerateDevices || !media.getUserMedia) {
+    microphoneErrorText='Mikrofone benötigen HTTPS oder localhost und einen aktuellen Browser.';
+    render();return;
+  }
+  if (requestPermission && (microphoneBusy || recording)) return;
+  const generation=++deviceRefresh;
+  if (requestPermission) { microphoneBusy=true;render(); }
+  try {
+    const devices=await (requestPermission ? requestMicrophones(media) : listMicrophones(media));
+    if (generation!==deviceRefresh) return;
+    microphoneChoices=devices;microphoneErrorText='';
+    if (requestPermission || microphone.activeInput) microphonesReady=true;
+  } catch (error) {
+    if (generation===deviceRefresh) microphoneErrorText=microphoneError(error);
+  } finally {
+    if (requestPermission) microphoneBusy=false;
+    if (generation===deviceRefresh) render();
+  }
+}
+
+function beatEditor(): string {
   const p = project();
-  return `<section class="arranger ${view==='song'?'expanded':'song-overview'}" id="arranger" aria-label="Song-Arranger">
-    <div class="arranger-heading"><div class="song-title-line"><h2>Dein Song</h2><span class="song-length">${p.song.length} Teile · ${time(durationSeconds(p))}</span></div>${view==='loops'?`<button class="action-button" data-action="view-song" ${disabled(busy||recording!==null||fileBusy)}>${icon('song')} Song bearbeiten</button>`:''}</div>
-    ${view==='song'?vocalWorkspace(p,selectedVocalId,recording,waves,locked()):`
-    <div class="song-parts" aria-label="Songteile in Reihenfolge">${p.song.map((part,index)=>`<button class="song-part ${editingId===part.id?'editing':''}" data-part="${esc(part.id)}" data-action="open-song-part" data-id="${esc(part.id)}" data-focus="part-${esc(part.id)}" aria-label="${esc(part.name)}, ${part.bars} Takte${part.vocal?', mit deiner Stimme':''}, im Song öffnen" ${disabled(busy||recording!==null||fileBusy)}>
-      <span class="part-number">${String(index+1).padStart(2,'0')}</span><span class="part-summary"><strong>${esc(part.name)}</strong><small>${part.bars} Takte</small></span>${partTracks(part.mix)}${part.vocal?`<span class="voice-present">${icon('mic')}</span>`:''}
-    </button>`).join('')}${p.song.length<MAX_PARTS?`<button class="new-part" data-action="add-part" ${disabled(locked()||activeCount(p.mix)===0)}>${icon('plus')}<span>Teil dazu</span></button>`:''}</div>`}
+  const index = p.song.findIndex(part => part.id === editingId);
+  const part = p.song[index];
+  if (!part) return '';
+  return `<section class="beat-editor" aria-label="Beat bearbeiten"><div class="section-heading"><h2>„${esc(part.name)}“ ändern</h2><div class="editor-heading-actions"><button class="action-button" data-action="preview-beat" ${disabled(busy||recording!==null||fileBusy)}> ${icon(audio.mode==='loops'?'stop':'play')} ${audio.mode==='loops'?'Beat stoppen':'Beat anhören'}</button><button class="action-button" data-action="finish-edit" ${disabled(locked())}>Fertig ${icon('check')}</button></div></div>
+    <div class="part-editor"><label>Name<span class="editable-name"><input aria-label="Name des Songteils" maxlength="24" value="${esc(part.name)}" data-name="${esc(part.id)}" data-focus="part-name" ${disabled(locked())}>${icon('edit')}</span></label><label>Länge<select data-bars="${esc(part.id)}" data-focus="part-bars" aria-label="Länge des Songteils" ${disabled(locked())}><option value="4" ${part.bars===4?'selected':''}>4 Takte</option><option value="8" ${part.bars===8?'selected':''}>8 Takte</option></select></label><div class="part-actions"><button class="action-button" data-action="move-left" data-id="${esc(part.id)}" aria-label="${esc(part.name)} nach links" ${disabled(locked()||index===0)}>← Links</button><button class="action-button" data-action="move-right" data-id="${esc(part.id)}" aria-label="${esc(part.name)} nach rechts" ${disabled(locked()||index===p.song.length-1)}>Rechts →</button><button class="action-button" data-action="copy-part" data-id="${esc(part.id)}" ${disabled(locked()||p.song.length>=MAX_PARTS)}>Duplizieren</button><button class="action-button" data-action="delete-part" data-id="${esc(part.id)}" ${disabled(locked())}>Entfernen</button></div></div>
+    <div class="loop-workspace"><div class="pads-section"><div class="pad-grid">${PACKS[p.pack].loops.map(pad).join('')}</div></div>${mixer()}</div>
   </section>`;
 }
 
 function render(): void {
-  if (!project().song.some(part => part.id === selectedVocalId)) selectedVocalId = project().song[0]?.id ?? null;
+  if (!project().vocals.some(clip => clip.id === selectedVocalId)) selectedVocalId = null;
+  if (panel==='beat'&&!project().song.some(part=>part.id===editingId)) { panel=null;editingId=null; }
   const focused = document.activeElement instanceof HTMLElement ? document.activeElement.dataset.focus : undefined;
-  const previousScroll = document.querySelector('.song-parts')?.scrollLeft ?? 0;
-  const oldTimeline = document.querySelector('.vocal-scroll');
-  const vocalScroll = oldTimeline?.scrollLeft ?? 0;
-  const oldSelection = oldTimeline?.querySelector<HTMLElement>('.vocal-part-heading.chosen')?.dataset.id;
+  const vocalScroll = document.querySelector('.vocal-scroll')?.scrollLeft ?? 0;
+  const panelScroll = document.querySelector('.panel-body')?.scrollTop ?? 0;
   const openPanels = [...document.querySelectorAll<HTMLDetailsElement>('details[data-panel][open]')].map(panel=>panel.dataset.panel);
   const p = project();
   const pack = PACKS[p.pack];
-  const editing = p.song.find(part=>part.id===editingId);
-  app.innerHTML=`<div class="studio-shell ${view==='loops'?'loops-view':'song-view'}">
-    <header class="studio-toolbar">
-      <button class="wordmark" data-action="view-loops" aria-label="BUMM, zum Beat-Baukasten" ${disabled(recording!==null||fileBusy)}>BUMM<span>.</span></button>
-      <div class="project-title"><input id="project-name" data-focus="project-name" maxlength="48" aria-label="Name deines Tracks" value="${esc(p.name)}">${icon('edit')}</div>
-      <div class="transport-controls"><div class="tempo-control"><button data-action="bpm-down" aria-label="Langsamer" ${disabled(locked()||audio.mode!==null||hasVocals(p)||p.bpm<=pack.minBpm)}>−</button><label><input type="number" id="bpm" data-focus="bpm" aria-label="Tempo in BPM" min="${pack.minBpm}" max="${pack.maxBpm}" value="${p.bpm}" ${disabled(locked()||audio.mode!==null||hasVocals(p))}><span>${hasVocals(p)?'BPM · FEST':'BPM'}</span></label><button data-action="bpm-up" aria-label="Schneller" ${disabled(locked()||audio.mode!==null||hasVocals(p)||p.bpm>=pack.maxBpm)}>+</button></div><button class="play-button" data-action="play" data-focus="play" aria-label="${recording?'Aufnahme stoppen':audio.mode?'Wiedergabe stoppen':view==='song'?'Song starten':'Loops starten'}" ${disabled(busy||fileBusy)}>${icon(audio.mode?'stop':'play')}<span>${recording?'Stopp':busy?'Lädt…':audio.mode?'Stopp':'Start'}</span></button><button class="record-entry" data-action="open-recorder" data-focus="open-recorder" ${disabled(busy||recording!==null||fileBusy)}>${icon('mic')}<span>${recording?'Aufnahme läuft':'Stimme aufnehmen'}</span></button></div>
-    </header>
-    <div class="studio-nav"><nav class="view-switch" aria-label="Studio-Bereich"><button data-action="view-loops" class="${view==='loops'?'active':''}" ${disabled(recording!==null||fileBusy)} aria-pressed="${view==='loops'}">${icon('pads')} Beat bauen</button><button data-action="view-song" class="${view==='song'?'active':''}" ${disabled(recording!==null||fileBusy)} aria-pressed="${view==='song'}">${icon('song')} Mein Song</button></nav><div class="pack-switch" aria-label="Soundset"><button data-action="pack" data-pack="hiphop" aria-pressed="${p.pack==='hiphop'}" class="${p.pack==='hiphop'?'active':''}" ${disabled(busy||recording!==null||fileBusy)}>Hip-Hop</button><button data-action="pack" data-pack="techno" aria-pressed="${p.pack==='techno'}" class="${p.pack==='techno'?'active':''}" ${disabled(busy||recording!==null||fileBusy)}>Techno</button></div><div class="beat-display" aria-label="Taktanzeige"><span id="bar-label">TAKT 01</span><div class="beat-lights" aria-hidden="true"><i></i><i></i><i></i><i></i></div></div><button class="undo-button" data-action="undo" aria-label="Letzte Änderung rückgängig" ${disabled(!history.length||busy||recording!==null||fileBusy)}>${icon('undo')} <span>Zurück</span></button></div>
+  app.innerHTML=`<div class="studio-shell song-view">
+    <header class="workspace-toolbar"><span class="wordmark">BUMM<span>.</span></span><div class="file-actions"><button class="action-button" data-action="save-project" aria-label="Projekt mit Aufnahmen sichern" ${disabled(busy||recording!==null||fileBusy)}>${icon('save')} Sichern</button><button class="action-button" data-action="load-project" aria-label="Projekt laden" ${disabled(busy||recording!==null||fileBusy)}>${icon('folder')} Laden</button><input id="project-file" class="sr-only" type="file" accept=".bumm,.json,application/json,application/octet-stream" aria-label="Projektdatei wählen" tabindex="-1"></div><span id="save-label" class="save-label"></span><label class="master-volume">${icon('volume')}<span class="sr-only">Abhörlautstärke</span><input type="range" id="master-volume" data-focus="master-volume" min="0" max="100" value="${masterVolume}"></label><button class="export-button" data-action="export-wav" data-focus="export-wav" aria-label="Song mit Beat und Stimme als WAV herunterladen" ${disabled(exporting||recording!==null||fileBusy||(!hasVocals(p)&&!p.song.some(part=>activeCount(part.mix))))}>${icon('down')} <span>${exporting?'Wird gebaut…':'Song herunterladen'}</span></button><button class="help-button" data-action="help" ${disabled(recording!==null||fileBusy)} aria-label="So geht BUMM">?</button></header>
+    <div class="studio-toolbar"><label class="project-title editable-name"><input id="project-name" data-focus="project-name" maxlength="48" aria-label="Name deines Tracks" value="${esc(p.name)}" ${disabled(locked())}>${icon('edit')}</label>
+      <div class="pack-switch" aria-label="Soundset"><button data-action="pack" data-pack="hiphop" aria-pressed="${p.pack==='hiphop'}" class="${p.pack==='hiphop'?'active':''}" ${disabled(locked()||audio.mode!==null)}>Hip-Hop</button><button data-action="pack" data-pack="techno" aria-pressed="${p.pack==='techno'}" class="${p.pack==='techno'?'active':''}" ${disabled(locked()||audio.mode!==null)}>Techno</button></div>
+      <div class="tempo-control"><button data-action="bpm-down" aria-label="Langsamer" ${disabled(locked()||audio.mode!==null||hasVocals(p)||p.bpm<=pack.minBpm)}>−</button><label><input type="number" id="bpm" data-focus="bpm" aria-label="Tempo in BPM" min="${pack.minBpm}" max="${pack.maxBpm}" value="${p.bpm}" ${disabled(locked()||audio.mode!==null||hasVocals(p))}><span>${hasVocals(p)?'BPM · FEST':'BPM'}</span></label><button data-action="bpm-up" aria-label="Schneller" ${disabled(locked()||audio.mode!==null||hasVocals(p)||p.bpm>=pack.maxBpm)}>+</button></div>
+    </div>
+    <div class="studio-nav"><button class="play-button" data-action="play" data-focus="play" aria-label="${recording?'Aufnahme stoppen':audio.mode?'Wiedergabe stoppen':'Song starten'}" ${disabled(busy||fileBusy||(!recording&&!audio.mode&&!durationSeconds(p)))}>${icon(audio.mode||recording?'stop':'play')}<span>${recording||audio.mode?'Stopp':busy?'Lädt…':'Song anhören'}</span></button><div class="song-time"><span id="position-time">${time(cursor)}</span><span> / ${time(durationSeconds(p))}</span></div><button class="icon-button" data-action="rewind" aria-label="Zum Songanfang" ${disabled(locked()||audio.mode!==null)}>↤</button><div class="beat-display" aria-label="Taktanzeige"><span id="bar-label">TAKT 01</span><div class="beat-lights" aria-hidden="true"><i></i><i></i><i></i><i></i></div></div><button class="undo-button" data-action="undo" aria-label="Letzte Änderung rückgängig" ${disabled(!history.length||busy||recording!==null||fileBusy)}>${icon('undo')} <span>Zurück</span></button></div>
     <span id="playback-status" class="sr-only"></span>
-    ${view==='loops'?`<section class="loop-workspace" aria-label="Loop-Baukasten"><div class="pads-section"><div class="section-heading"><h1>${editing?`Mischung für „${esc(editing.name)}“`:'Was spielt mit?'}</h1>${editing?'<button class="action-button finish-edit" data-action="finish-edit">Fertig '+icon('check')+'</button>':'<span class="matching-note">Pro Farbe ein Sound.</span>'}</div><div class="pad-grid">${pack.loops.map(pad).join('')}</div></div>${mixer()}</section>`:''}
-    ${arranger()}
-    <footer class="studio-footer"><div class="file-actions"><button class="action-button" data-action="save-project" aria-label="Projekt mit Aufnahmen sichern" ${disabled(busy||recording!==null||fileBusy)}>${icon('save')} Sichern</button><button class="action-button" data-action="load-project" aria-label="Projekt laden" ${disabled(busy||recording!==null||fileBusy)}>${icon('folder')} Laden</button><input id="project-file" class="sr-only" type="file" accept=".bumm,.json,application/json,application/octet-stream" aria-label="Projektdatei wählen" tabindex="-1"></div><span id="save-label" class="save-label"></span><label class="master-volume">${icon('volume')}<span class="sr-only">Abhörlautstärke</span><input type="range" id="master-volume" data-focus="master-volume" min="0" max="100" value="${masterVolume}"></label><button class="export-button" data-action="export-wav" data-focus="export-wav" aria-label="Song mit Beat und Stimme als WAV herunterladen" ${disabled(exporting||recording!==null||fileBusy||!p.song.length||!p.song.some(part=>activeCount(part.mix)||part.vocal))}>${icon('down')} <span>${exporting?'Wird gebaut…':'Song herunterladen'}</span></button><button class="help-button" data-action="help" ${disabled(recording!==null||fileBusy)} aria-label="So geht BUMM">?</button></footer>
-    <dialog id="help-dialog"><div class="dialog-heading"><span class="wordmark">BUMM<span>.</span></span><button class="icon-button" data-action="close-help" aria-label="Hilfe schließen">${icon('close')}</button></div><h2>Du hast den Takt.</h2><ol><li><strong>Sounds aussuchen</strong><p>Tippe auf die großen Pads. Pro Farbe passt ein Sound in deine Mischung.</p></li><li><strong>Start drücken</strong><p>Alles spielt im gleichen Takt. Neue Sounds steigen beim nächsten Takt ein.</p></li><li><strong>Einen Song bauen</strong><p>Merke dir Mischungen als Songteile. Unter „Mein Song“ wählst du einen Teil und singst deine Stimme dazu. Ordne die Teile mit den Pfeilen an.</p></li></ol><p class="storage-help">Deine Projekte bleiben in diesem Browser. Mit „Sichern“ kannst du sie aufheben oder auf einem anderen Gerät laden. „Song herunterladen“ speichert Beat und Stimme zusammen als WAV-Datei. Nutze Kopfhörer beim Einsingen. Das Tempo bleibt nach einer Aufnahme fest.</p><button class="play-button" data-action="close-help">Los geht’s ${icon('arrow')}</button></dialog>
+    <div class="workspace-body ${panel?'has-panel':''}"><section class="arranger expanded" id="arranger" aria-label="Song-Arranger"><div class="arranger-heading"><div class="song-title-line"><h1>Dein Song</h1><span class="song-length">${p.song.length} Teile</span></div><div class="arranger-actions"><button class="action-button voice-entry" data-action="open-voice" data-focus="voice-entry" aria-label="Stimme aufnehmen" aria-expanded="${panel==='voice'}" ${disabled(busy||fileBusy||microphoneBusy||recording!==null)}>${icon('mic')} Stimme aufnehmen</button><button class="action-button" data-action="add-part" ${disabled(locked()||p.song.length>=MAX_PARTS)}>${icon('plus')} Beat anhängen</button></div></div>
+    ${vocalWorkspace(p,{editingId,selectedVocalId,voiceSetup,session:recording,waves,locked:locked(),headphones,cursor,microphone:'',microphoneUnavailable:false})}</section>
+    ${panel ? `<aside class="work-panel" aria-label="${panel==='beat'?'Beat-Einstellungen':'Aufnahme-Einstellungen'}"><div class="panel-heading"><h2>${panel==='beat'?'Beat ändern':selectedVocalId&&!voiceSetup?'Aufnahme bearbeiten':'Deine Stimme'}</h2><button class="icon-button" data-action="close-panel" aria-label="Panel schließen" ${disabled(locked())}>${icon('close')}</button></div><div class="panel-body">${panel==='beat'?beatEditor():recordingPanel(p,{editingId,selectedVocalId,voiceSetup,session:recording,waves,locked:locked(),headphones,cursor,microphone:microphonePicker(),microphoneUnavailable:Boolean(selectedMicrophone&&!microphoneChoices.some(device=>device.id===selectedMicrophone))})}</div></aside>` : ''}</div>
+
+    <dialog id="help-dialog"><div class="dialog-heading"><span class="wordmark">BUMM<span>.</span></span><button class="icon-button" data-action="close-help" aria-label="Hilfe schließen">${icon('close')}</button></div><h2>Dein Song, deine Stimme.</h2><ol><li><strong>Beats aufreihen</strong><p>Tippe auf einen Beat, um seine Sounds, Länge und Reihenfolge rechts zu ändern.</p></li><li><strong>Song anhören</strong><p>Der weiße Strich zeigt, wo du bist. Wenn die Musik steht, setzt du die Position oben in der Taktleiste.</p></li><li><strong>Stimme aufnehmen</strong><p>Tippe auf die Stimmspur. Wähle rechts dein Mikrofon und ob du Kopfhörer trägst. Ohne Kopfhörer bleibt die Begleitung stumm. Vier Schläge einzählen, dann singen. Deine Stimme darf über mehrere Beats laufen oder ganz allein stehen.</p></li></ol><p class="storage-help">Mit „Sichern“ hebst du dein Projekt samt Aufnahmen auf. „Song herunterladen“ speichert alles als WAV-Datei. Das Tempo bleibt nach einer Aufnahme fest. Neue Aufnahmen starten an der Abspiellinie. Wähle eine Aufnahme und „Neu aufnehmen“, um sie zu ersetzen. Beats verschieben oder löschen verändert deine Stimme nicht.</p><button class="play-button" data-action="close-help">Los geht’s ${icon('arrow')}</button></dialog>
   </div>`;
   if (!document.querySelector('#toast')) {
     const toast=document.createElement('div'); toast.id='toast'; toast.setAttribute('role','status'); toast.setAttribute('aria-live','polite'); toast.hidden=true; document.body.append(toast);
   }
   updateSaveLabel();
-  const parts = document.querySelector('.song-parts');
-  if (parts) parts.scrollLeft=previousScroll;
   const timeline = document.querySelector('.vocal-scroll');
-  if (timeline) {
-    timeline.scrollLeft = vocalScroll;
-    if (!oldTimeline || oldSelection !== selectedVocalId || recording?.phase === 'preparing') {
-      const selected = timeline.querySelector<HTMLElement>('.vocal-part-heading.chosen');
-      if (selected) timeline.scrollLeft = Math.max(0, selected.offsetLeft - 118);
-    }
-  }
+  if (timeline) timeline.scrollLeft = vocalScroll;
+  const panelBody=document.querySelector('.panel-body');
+  if (panelBody) panelBody.scrollTop=panelScroll;
   for (const panel of openPanels) app.querySelector<HTMLDetailsElement>(`details[data-panel="${panel}"]`)?.setAttribute('open','');
   if (focused) app.querySelector<HTMLElement>(`[data-focus="${CSS.escape(focused)}"]`)?.focus({ preventScroll:true });
   lastPosition='';
   updatePosition();
+  if (audio.mode && positionTimer === undefined) positionTimer = window.setInterval(()=>{updatePosition();updateRecording();},50);
+  if (!audio.mode && !recording && positionTimer !== undefined) { clearInterval(positionTimer); positionTimer=undefined; }
 }
 
 function updateSaveLabel(): void {
@@ -203,36 +234,46 @@ function updateSaveLabel(): void {
 }
 
 function updatePosition(): void {
-  const position=audio.position();
-  const key=JSON.stringify(position);
-  if (lastPosition===key) return;
-  lastPosition=key;
+  const position = audio.position();
+  const seconds = position && audio.mode === 'song' ? position.seconds : cursor;
+  const line = document.querySelector<HTMLElement>('#song-playhead');
+  const timeline = document.querySelector<HTMLElement>('.song-timeline');
+  if (line && timeline) {
+    line.style.left = `${Math.min(100, seconds / Number(timeline.dataset.duration) * 100)}%`;
+    const scroll = document.querySelector('.vocal-scroll');
+    if (position && audio.mode === 'song' && scroll) {
+      const x = 72 + line.offsetLeft;
+      if (x > scroll.scrollLeft + scroll.clientWidth - 32 || x < scroll.scrollLeft + 72) scroll.scrollLeft = Math.max(0, x - 120);
+    }
+  }
+  const clock = document.querySelector('#position-time');
+  if (clock) clock.textContent = time(seconds);
+  const key = `${position?.bar}:${position?.beat}:${position?.countIn}:${position?.part}:${audio.mode}:${Math.floor(cursor)}`;
+  if (lastPosition === key) return;
+  lastPosition = key;
   document.querySelectorAll<HTMLElement>('.beat-lights i').forEach((light,index)=>light.classList.toggle('lit',position?.beat===index));
   const bar=document.querySelector('#bar-label');
-  if (bar) bar.textContent=`TAKT ${String(position ? audio.mode==='song'?position.bar+1:position.bar%4+1 : 1).padStart(2,'0')}`;
-  const playingPartId=recording?.partId??previewPartId??project().song[position?.part??-1]?.id;
-  const playingPart=project().song.find(part=>part.id===playingPartId);
+  if (bar) bar.textContent = position?.countIn ? `EINZÄHLEN ${position.countIn} / 4` : `TAKT ${Math.floor(seconds / (240 / project().bpm)) + 1} · ${position ? position.beat + 1 : 1}`;
+  const playingPartId = audio.mode === 'song' ? project().song[position?.part ?? -1]?.id : null;
+  document.querySelectorAll<HTMLElement>('[data-part]').forEach(part=>part.classList.toggle('is-playing',Boolean(position)&&part.dataset.part===playingPartId));
   const status=document.querySelector('#playback-status');
-  if (status) status.textContent=busy?'Deine Sounds werden vorbereitet.':position?.pending?'Deine Änderung kommt im nächsten Takt.':audio.mode==='song'?`Jetzt: ${playingPart?.name??'Dein Song'}`:position?'Dein Beat läuft. Probier einen anderen Sound.':'Such dir Sounds aus. Dann drück Start.';
-  document.querySelectorAll<HTMLElement>('.song-part').forEach(part=>part.classList.toggle('is-playing',Boolean(position)&&part.dataset.part===playingPartId));
-  document.querySelectorAll<HTMLElement>('[data-vocal-part]').forEach(part=>part.classList.toggle('is-playing',Boolean(position)&&part.dataset.vocalPart===playingPartId));
+  if (status) status.textContent=position?.pending?'Deine Änderung kommt im nächsten Takt.':position?'Dein Song läuft.':'Tippe auf einen Beat, um ihn zu ändern.';
   document.querySelector('.play-button')?.classList.toggle('is-playing',audio.mode!==null);
 }
 
-async function play(mode: 'loops'|'song', partId: string | null = null): Promise<void> {
+async function play(mode: 'loops'|'song'): Promise<void> {
   if (busy||fileBusy||recording) return;
-  if (audio.mode===mode || (mode==='loops'&&audio.mode)) { audio.stop(); render(); return; }
-  if (mode==='song'&&!project().song.length) return;
+  if (audio.mode) { if (audio.mode === 'song') cursor = Math.min(MAX_START_SECONDS, audio.position()?.seconds ?? cursor); audio.stop(); render(); return; }
+  if (mode==='song'&&!durationSeconds(project())) return;
+  if (mode==='song'&&cursor>=durationSeconds(project())) cursor=0;
   const generation=++playGeneration;
   busy=true; render();
   try {
     await audio.unlock();
     const snapshot=clone(project());
-    if (partId) snapshot.song=snapshot.song.filter(part=>part.id===partId);
-    previewPartId=partId;
     const library=mode==='song'?await takes.forProject(snapshot):{};
     if (generation!==playGeneration) return;
-    await audio.start(snapshot,mode,library);
+    await audio.start(snapshot,mode,library,{startSeconds:cursor});
   } catch (error) {
     audio.stop();
     announce(error instanceof Error?error.message:'Die Musik konnte nicht starten. Bitte versuche es nochmal.',true);
@@ -248,7 +289,7 @@ function download(blob: Blob,filename: string): void {
 function filename(name: string): string { return name.replace(/[^\p{L}\p{N} _-]/gu,'').trim()||'Mein Beat'; }
 
 async function exportWav(): Promise<void> {
-  if (exporting||!project().song.length) return;
+  if (exporting||!durationSeconds(project())) return;
   const snapshot=clone(project());
   exporting=true; render();
   announce('Dein Song wird als Audiodatei gebaut.');
@@ -269,28 +310,20 @@ app.addEventListener('click',event=>{
   if (action==='cancel-record') { cancelRecording(); return; }
   if (action==='record') { if (recording) finishRecording(); else void recordVocal(); return; }
   if (action==='play'&&recording) { finishRecording(); return; }
-  if (recording||fileBusy) return;
-  if (action==='open-recorder'||action==='open-song-part') {
-    if (busy) return;
-    audio.stop();
-    if (id&&p.song.some(part=>part.id===id)) selectedVocalId=id;
-    view='song'; render();
-    const target=app.querySelector<HTMLElement>(action==='open-recorder'?'.record-button':'.vocal-part-heading.chosen');
-    target?.focus({preventScroll:true});
-    target?.scrollIntoView({block:'nearest'});
-    return;
-  }
-  if (action==='play') { void play(view); return; }
-  if (action==='preview-part') { void play('song',selectedVocalId); return; }
-  if (action==='play-song') { void play('song'); return; }
+  if (recording||fileBusy||microphoneBusy) return;
+  if (action==='allow-microphones') { void refreshMicrophones(true);return; }
+  if (action==='refresh-microphones') { void refreshMicrophones();return; }
+  if (action==='close-panel') { if (audio.mode==='loops') audio.stop();panel=null;editingId=null;render();return; }
+  if (action==='open-voice'&&!busy) { if (audio.mode==='loops') audio.stop();panel='voice';editingId=null;selectedVocalId=null;voiceSetup=true;render();document.querySelector('.panel-body')?.scrollTo({top:0});return; }
+  if (action==='play') { void play('song'); return; }
+  if (action==='preview-beat') { void play('loops'); return; }
   if (action==='export-wav') { void exportWav(); return; }
   if (action==='help') { document.querySelector<HTMLDialogElement>('#help-dialog')!.showModal(); return; }
   if (action==='close-help') { document.querySelector<HTMLDialogElement>('#help-dialog')!.close(); return; }
-  if (action==='view-loops'||action==='view-song') { view=action==='view-loops'?'loops':'song'; render(); return; }
   if (action==='pack') {
     const pack=button.dataset.pack as PackId;
     if (pack===studio.currentPack) return;
-    audio.stop(); editingId=null;
+    audio.stop(); panel=null;editingId=null; selectedVocalId=null; cursor=0;
     mutate(()=>{studio.currentPack=pack;});
     void refreshWaves();
     announce(`${PACKS[pack].name}: dein eigener Track mit eigenen Sounds.`);
@@ -299,15 +332,16 @@ app.addEventListener('click',event=>{
   if (action==='undo') {
     const previous=history.pop();
     if (!previous) return;
-    audio.stop(); studio=previous; editingId=null; save(); render(); announce('Letzte Änderung rückgängig.'); return;
+    audio.stop(); studio=previous; editingId=null; selectedVocalId=null; panel=null;cursor=0; save(); render(); announce('Letzte Änderung rückgängig.'); return;
   }
   if (action==='save-project') { void saveProjectFile(); return; }
   if (action==='load-project') { document.querySelector<HTMLInputElement>('#project-file')!.click(); return; }
   if (locked()) return;
-  if (action==='select-vocal') { selectedVocalId=id!; render(); return; }
+  if (action==='rewind') { cursor=0;selectedVocalId=null;render();return; }
+  if (action==='prepare-replacement'||action==='cancel-setup') { voiceSetup=action==='prepare-replacement';render();document.querySelector('.panel-body')?.scrollTo({top:0});return; }
+  if (action==='select-vocal') { if (audio.mode==='loops') audio.stop();panel='voice';editingId=null;selectedVocalId=id!;voiceSetup=false;cursor=p.vocals.find(clip=>clip.id===id)?.startSeconds??cursor;render();document.querySelector('.panel-body')?.scrollTo({top:0});return; }
   if (action==='remove-vocal') {
-    const part=p.song.find(part=>part.id===selectedVocalId);
-    if (part?.vocal) { mutate(()=>{part.vocal=null;}); announce('Aufnahme entfernt. Mit Rückgängig holst du sie zurück.'); }
+    if (p.vocals.some(clip=>clip.id===selectedVocalId)) { panel=null;mutate(()=>{p.vocals=p.vocals.filter(clip=>clip.id!==selectedVocalId);}); announce('Aufnahme entfernt. Mit Rückgängig holst du sie zurück.'); }
     return;
   }
   if (action==='loop') {
@@ -321,21 +355,21 @@ app.addEventListener('click',event=>{
   if ((action==='bpm-down'||action==='bpm-up')&&!hasVocals(p)) {
     mutate(()=>{p.bpm+=action==='bpm-down'?-1:1;}); return;
   }
-  if (action==='finish-edit') { editingId=null; render(); return; }
+  if (action==='finish-edit') { audio.stop();panel=null;editingId=null;render();return; }
   if (action==='add-part') {
-    if (p.song.length>=MAX_PARTS||!activeCount(p.mix)) return;
+    if (p.song.length>=MAX_PARTS) return;
     const newId=crypto.randomUUID();
-    mutate(()=>{p.song.push({id:newId,name:p.song.length===3?'Finale':`Teil ${p.song.length+1}`,bars:4,mix:clone(p.mix),vocal:null});});
-    document.querySelector('.song-parts')?.scrollTo({left:10000});
+    mutate(()=>{p.song.push({id:newId,name:p.song.length===3?'Finale':`Teil ${p.song.length+1}`,bars:4,mix:clone(p.mix)});});
+    document.querySelector('.vocal-scroll')?.scrollTo({left:10000});
     announce('Deine Mischung ist jetzt ein neuer Songteil.'); return;
   }
   const index=p.song.findIndex(part=>part.id===id);
   if (index<0) return;
   if (action==='edit-part') {
-    editingId=id!; view='loops';
-    mutate(()=>{p.mix=clone(p.song[index].mix);});
+    if (editingId===id) { audio.stop();panel=null;editingId=null;render();return; }
+    panel='beat';editingId=id!;p.mix=clone(p.song[index].mix);render();
     audio.setMix(p.mix);
-    document.querySelector('.pads-section')?.scrollIntoView({block:'nearest'});
+    document.querySelector('.panel-body')?.scrollTo({top:0});
     announce(`Du bearbeitest jetzt „${p.song[index].name}“.`); return;
   }
   if (action==='move-left'||action==='move-right') {
@@ -362,16 +396,18 @@ app.addEventListener('input',event=>{
   const input=event.target as HTMLInputElement;
   if (input.id==='master-volume') { masterVolume=Number(input.value); audio.setVolume(masterVolume/100); return; }
   if (input.dataset.voiceControl&&!locked()) {
-    const part=project().song.find(part=>part.id===selectedVocalId);
-    if (input.dataset.voiceControl==='beat') project().beatLevel=Number(input.value)/100;
-    if (part?.vocal&&input.dataset.voiceControl==='volume') part.vocal.volume=Number(input.value)/100;
-    if (part?.vocal&&input.dataset.voiceControl==='timing') {
-      part.vocal.shiftMs=Number(input.value);
+    const clip=project().vocals.find(clip=>clip.id===selectedVocalId);
+    if (clip&&input.dataset.voiceControl==='beat') clip.beatLevel=Number(input.value)/100;
+    if (clip&&input.dataset.voiceControl==='volume') clip.volume=Number(input.value)/100;
+    if (clip&&input.dataset.voiceControl==='timing') {
+      clip.shiftMs=Number(input.value);
       const output=document.querySelector('#timing-value');
-      if (output) output.textContent=`${part.vocal.shiftMs} ms`;
+      if (output) output.textContent=`${clip.shiftMs} ms`;
     }
     save(); return;
   }
+  if (locked()) return;
+  if (input.id==='song-position') { cursor=Number(input.value);selectedVocalId=null;input.setAttribute('aria-valuetext',time(cursor));updatePosition();return; }
   if (input.dataset.level) {
     const role=input.dataset.level as Role;
     project().mix.levels[role]=Number(input.value)/100;
@@ -391,6 +427,18 @@ app.addEventListener('input',event=>{
 app.addEventListener('change',event=>{
   const input=event.target as HTMLInputElement;
   if (input.id==='project-file') { void importProject(input); return; }
+  if (input.id==='microphone-input'&&!locked()) { selectedMicrophone=input.value;microphoneErrorText='';render();return; }
+  if (input.name==='headphones'&&!locked()) { headphones=input.value==='yes';render();return; }
+  if (input.id==='song-position'&&!locked()) { render();return; }
+  if (input.dataset.clipPosition&&!locked()) {
+    const clip=project().vocals.find(clip=>clip.id===selectedVocalId);
+    const key=input.dataset.clipPosition;
+    const value=Number(input.value);
+    const max=key==='startSeconds'?MAX_START_SECONDS:MAX_TAKE_SECONDS;
+    if (!clip||(key!=='startSeconds'&&key!=='durationSeconds')) return;
+    if (!Number.isFinite(value)||value<0||(key==='durationSeconds'&&value===0)||value>max) { input.value=String(clip[key]);return; }
+    mutate(()=>{clip[key]=value;});return;
+  }
   if (input.id==='bpm') {
     if (hasVocals(project())||locked()) { input.value=String(project().bpm); return; }
     const bpm=Number(input.value);
@@ -439,8 +487,8 @@ async function importProject(input: HTMLInputElement): Promise<void> {
     const decoded=decodeProject(await file.arrayBuffer());
     const imported=remapImported(decoded.project,decoded.takes,()=>crypto.randomUUID());
     await takes.putAll(imported.takes);
-    for (const take of imported.takes) waves.set(take.id,waveform(take));
-    editingId=null;
+    for (const take of imported.takes) waves.set(take.id,{peaks:waveform(take),seconds:take.samples.length/take.sampleRate});
+    panel=null;editingId=null;selectedVocalId=null;cursor=0;
     mutate(()=>{studio.currentPack=imported.project.pack;studio.projects[imported.project.pack]=imported.project;});
     announce('Projekt samt Aufnahmen geladen. Dein vorheriger Stand bleibt über Rückgängig erreichbar.');
   } catch (error) { announce(error instanceof Error?error.message:'Diese Projektdatei konnte nicht geladen werden.',true); }
@@ -451,29 +499,33 @@ async function refreshWaves(): Promise<void> {
   const snapshot=project();
   try {
     const library=await takes.forProject(snapshot);
-    for (const take of Object.values(library)) if (!waves.has(take.id)) waves.set(take.id,waveform(take));
+    for (const take of Object.values(library)) if (!waves.has(take.id)) waves.set(take.id,{peaks:waveform(take),seconds:take.samples.length/take.sampleRate});
     if (snapshot===project()&&!recording) render();
   } catch (error) { if (snapshot===project()) announce(error instanceof Error?error.message:'Aufnahme fehlt.',true); }
 }
 
 async function recordVocal(): Promise<void> {
-  const part=project().song.find(part=>part.id===selectedVocalId);
-  if (!part||locked()) return;
+  if (locked()) return;
   const owner=project();
+  const selected=owner.vocals.find(clip=>clip.id===selectedVocalId);
+  if (!selected&&owner.vocals.length>=MAX_VOCALS) return;
+  const startSeconds=Math.min(MAX_START_SECONDS,selected?.startSeconds??cursor);
+  const clipId=selected?.id??null;
   const generation=++recordGeneration;
-  audio.stop(); previewPartId=null;
-  recording={partId:part.id,phase:'preparing'};
-  view='song'; render();
+  audio.stop();cursor=startSeconds;
+  recording={startSeconds,clipId,phase:'preparing'};
+  render();
   let captured: Promise<Take> | undefined;
   try {
     const context=await audio.unlock();
     if (generation!==recordGeneration) throw new RecordingCancelled();
-    await microphone.prepare(context);
+    await microphone.prepare(context,headphones,selectedMicrophone);
+    microphonesReady=true;
+    void refreshMicrophones();
     if (generation!==recordGeneration) throw new RecordingCancelled();
-    const backing=clone(owner); backing.song=[clone(part)];
-    const started=await audio.start(backing,'song',{}, {recording:true,onScheduled:schedule=>{
+    const started=await audio.start(clone(owner),'song',{}, {recording:true,headphones,startSeconds,recordingSeconds:MAX_TAKE_SECONDS,onScheduled:schedule=>{
       if (generation!==recordGeneration) throw new RecordingCancelled();
-      recording={partId:part.id,phase:'count-in',schedule};
+      recording={startSeconds,clipId,phase:'count-in',schedule};
       captured=microphone.capture(schedule.startTime,schedule.endTime);
       void captured.catch(()=>{});
       render();
@@ -481,13 +533,15 @@ async function recordVocal(): Promise<void> {
     if (!started||!captured) throw new RecordingCancelled();
     const take=await captured;
     if (generation!==recordGeneration) throw new RecordingCancelled();
-    recording={partId:part.id,phase:'saving'}; audio.stop(); render();
+    recording={startSeconds,clipId,phase:'saving'};audio.stop();render();
     await takes.putAll([take]);
     if (generation!==recordGeneration) throw new RecordingCancelled();
-    waves.set(take.id,waveform(take));
-    recording=null;
-    mutate(()=>{part.vocal={takeId:take.id,volume:.9,shiftMs:0};});
-    announce(`Deine Stimme ist jetzt in „${part.name}“.`);
+    waves.set(take.id,{peaks:waveform(take),seconds:take.samples.length/take.sampleRate});
+    const clip={id:clipId??crypto.randomUUID(),takeId:take.id,startSeconds,durationSeconds:take.samples.length/take.sampleRate,volume:selected?.volume??.9,beatLevel:selected?.beatLevel??owner.beatLevel,shiftMs:0};
+    recording=null;selectedVocalId=clip.id;voiceSetup=false;
+    mutate(()=>{if (selected) owner.vocals[owner.vocals.indexOf(selected)]=clip;else owner.vocals.push(clip);});
+    document.querySelector('.panel-body')?.scrollTo({top:0});
+    announce('Deine Stimme ist im Song. Die Beats bleiben unabhängig davon.');
   } catch (error) {
     if (generation===recordGeneration&&!(error instanceof RecordingCancelled)) announce(microphoneError(error),true);
   } finally {
@@ -496,7 +550,8 @@ async function recordVocal(): Promise<void> {
 }
 
 function cancelRecording(): void {
-  recordGeneration++; microphone.cancel(); audio.stop(); recording=null; render();
+  recordGeneration++; microphone.cancel(); audio.stop(); recording=null; voiceSetup=!selectedVocalId; render();
+  document.querySelector('.panel-body')?.scrollTo({top:0});
   announce('Aufnahme abgebrochen. Deine vorige Aufnahme bleibt erhalten.');
 }
 
@@ -529,7 +584,7 @@ microphone.onInterrupted=()=>{ if(recording) { cancelRecording(); announce('Das 
 
 document.addEventListener('keydown',event=>{
   if ((event.target as HTMLElement).matches('input,select,textarea,button,summary')||document.querySelector('dialog[open]')) return;
-  if (event.code==='Space') { event.preventDefault(); if(recording) finishRecording(); else void play(view); }
+  if (event.code==='Space') { event.preventDefault(); if(recording) finishRecording(); else void play('song'); }
   if (event.code==='Escape'&&recording) { event.preventDefault();cancelRecording(); }
   if ((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='z'&&!busy&&!recording) {
     event.preventDefault();document.querySelector<HTMLButtonElement>('[data-action="undo"]')?.click();
@@ -541,8 +596,10 @@ document.addEventListener('visibilitychange',()=>{
 });
 audio.onStop=reason=>{
   if(reason==='interrupted'&&recording) { cancelRecording();announce('Audio wurde unterbrochen. Bitte starte die Aufnahme nochmal.',true); }
-  else render();
+  else { if (reason==='end'&&!recording) cursor=0;render(); }
 };
 render();
 void refreshWaves();
-window.setInterval(()=>{updatePosition();updateRecording();},100);
+
+void refreshMicrophones();
+navigator.mediaDevices?.addEventListener('devicechange',()=>{ if (!microphoneBusy) void refreshMicrophones(); });

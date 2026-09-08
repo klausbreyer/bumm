@@ -1,13 +1,31 @@
-import type { Project, VocalClip } from './project';
-import { hasVocals, takeIds } from './project';
+import type { Project, VocalClip, TimelineVocal } from './project';
+import { hasVocals, takeIds, MAX_TAKE_SECONDS } from './project';
 
-export const MAX_TAKE_SECONDS = 30;
+export { MAX_TAKE_SECONDS } from './project';
 export const VOCAL_GAIN = .48;
 export interface Take { id: string; sampleRate: number; samples: Float32Array<ArrayBuffer> }
 export type TakeLibrary = Record<string, Take>;
 
-export function beatGain(project: Project, recording = false): number {
-  return project.beatLevel * (recording || hasVocals(project) ? .5 : 1);
+/** Overlapping voice sections use the quieter backing level, never a summed gain. */
+export function beatGain(project: Project, recording = false, seconds = 0): number {
+  let level = Infinity;
+  for (const clip of project.vocals) {
+    if (seconds >= clip.startSeconds && seconds < clip.startSeconds + clip.durationSeconds) {
+      level = Math.min(level, clip.beatLevel ?? project.beatLevel);
+    }
+  }
+  return (level === Infinity ? project.beatLevel : level) * (recording || hasVocals(project) ? .5 : 1);
+}
+
+/** Shared gain changes keep playback, seeking and WAV export on the same section boundaries. */
+export function beatLevels(project: Project, recording = false): { start: number; gain: number }[] {
+  const times = [...new Set([0, ...project.vocals.flatMap(clip => [clip.startSeconds, clip.startSeconds + clip.durationSeconds])])].sort((a, b) => a - b);
+  const result: { start: number; gain: number }[] = [];
+  for (const start of times) {
+    const gain = beatGain(project, recording, start);
+    if (result.at(-1)?.gain !== gain) result.push({ start, gain });
+  }
+  return result;
 }
 
 export function validTake(take: Take): boolean {
@@ -34,7 +52,7 @@ export function prepareTake(id: string, sampleRate: number, samples: Float32Arra
   return take;
 }
 
-/** Both live playback and export trim shifted takes at the song-part boundaries. */
+/** Timing adjustment trims at the clip window, independent of beat boundaries. */
 export function vocalPlacement(clip: VocalClip, take: Take, partSeconds: number): { start: number; offset: number; duration: number } {
   const shift = clip.shiftMs / 1000;
   const start = Math.max(0, shift);
@@ -57,4 +75,12 @@ export function waveform(take: Take, count = 64): number[] {
     for (let i = Math.floor(bar * stride); i < Math.floor((bar + 1) * stride); i++) peak = Math.max(peak, Math.abs(take.samples[i]));
     return peak;
   });
+}
+
+/** Absolute song placement shared by Web Audio and WAV export, including seeking. */
+export function timelinePlacement(clip: TimelineVocal, take: Take, from = 0): { start: number; offset: number; duration: number } {
+  const placement = vocalPlacement(clip, take, clip.durationSeconds);
+  const originalStart = clip.startSeconds + placement.start;
+  const skipped = Math.max(0, from - originalStart);
+  return { start: Math.max(from, originalStart), offset: placement.offset + skipped, duration: Math.max(0, placement.duration - skipped) };
 }

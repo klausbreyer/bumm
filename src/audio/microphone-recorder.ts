@@ -1,5 +1,6 @@
 import captureUrl from './capture-worklet.ts?worker&url';
 import { prepareTake } from '../music/vocals';
+import type { MicrophoneInput } from './microphone-inputs';
 import type { Take } from '../music/vocals';
 
 export class RecordingCancelled extends Error {}
@@ -18,13 +19,18 @@ export class MicrophoneRecorder {
   onLevel: (level: number) => void = () => {};
   onInterrupted: () => void = () => {};
 
-  async prepare(context: AudioContext, headphones = true): Promise<void> {
+  get activeInput(): MicrophoneInput | null {
+    const track = this.stream?.getAudioTracks()[0];
+    return track ? { id: track.getSettings().deviceId ?? '', label: track.label || 'Systemmikrofon' } : null;
+  }
+
+  async prepare(context: AudioContext, headphones = true, deviceId = ''): Promise<void> {
     this.cancel();
     const generation = this.generation;
     if (!navigator.mediaDevices?.getUserMedia || !context.audioWorklet) throw new Error('Für Aufnahmen braucht BUMM HTTPS oder localhost und einen aktuellen Browser.');
     this.context = context;
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      audio: { ...(deviceId ? { deviceId: { exact: deviceId } } : {}), channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
       video: false,
     });
     if (generation !== this.generation) { stream.getTracks().forEach(track => track.stop()); throw new RecordingCancelled(); }
@@ -105,6 +111,7 @@ export class MicrophoneRecorder {
 
 export function microphoneError(error: unknown): string {
   if (error instanceof DOMException && error.name === 'NotAllowedError') return 'Erlaube den Mikrofonzugriff im Browser und versuche es nochmal.';
+  if (error instanceof DOMException && error.name === 'OverconstrainedError') return 'Das gewählte Mikrofon ist nicht verfügbar. Wähle ein anderes Mikrofon.';
   if (error instanceof DOMException && error.name === 'NotFoundError') return 'Kein Mikrofon gefunden. Verbinde ein Mikrofon und versuche es nochmal.';
   if (error instanceof DOMException && error.name === 'NotReadableError') return 'Das Mikrofon ist gerade nicht verfügbar. Schließe andere Aufnahme-Apps und versuche es nochmal.';
   return error instanceof Error ? error.message : 'Die Aufnahme konnte nicht starten. Bitte versuche es nochmal.';

@@ -3,7 +3,7 @@ import type { Loop, LoopId, PackId } from './catalog';
 import { ROLES } from './catalog';
 import { totalBars } from './project';
 import type { Project } from './project';
-import { beatGain, requireTakes, VOCAL_GAIN, vocalSample, timelinePlacement } from './vocals';
+import { beatLevels, requireTakes, VOCAL_GAIN, vocalSample, timelinePlacement } from './vocals';
 import type { TakeLibrary } from './vocals';
 
 export const SAMPLE_RATE = 44100;
@@ -191,7 +191,8 @@ export function renderBank(pack: PackId, bpm: number, sampleRate = SAMPLE_RATE):
 /** Write PCM directly into the WAV buffer to bound memory use on mobile devices. */
 export function renderWav(project: Project, bank: LoopBank, takes: TakeLibrary = {}): ArrayBuffer {
   requireTakes(project, takes);
-  const backingGain = beatGain(project);
+  const levels = beatLevels(project);
+  let levelIndex = 0;
   const frames = Math.max(totalBars(project)*bank.frames/4, ...project.vocals.map(clip => (clip.startSeconds + clip.durationSeconds) * bank.sampleRate));
   const frameCount = Math.round(frames);
   const output = new ArrayBuffer(44+frameCount*4);
@@ -213,6 +214,8 @@ export function renderWav(project: Project, bank: LoopBank, takes: TakeLibrary =
   for (let frame = 0; frame < frameCount; frame++) {
     while (parts[partIndex] && frame >= parts[partIndex].end) partIndex++;
     const part = parts[partIndex];
+    while (levels[levelIndex + 1] && frame / bank.sampleRate >= levels[levelIndex + 1].start) levelIndex++;
+    const backingGain = levels[levelIndex].gain;
     let left = 0; let right = 0;
     if (part) {
       const relative = frame - part.start;

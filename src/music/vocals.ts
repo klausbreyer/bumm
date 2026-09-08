@@ -6,8 +6,26 @@ export const VOCAL_GAIN = .48;
 export interface Take { id: string; sampleRate: number; samples: Float32Array<ArrayBuffer> }
 export type TakeLibrary = Record<string, Take>;
 
-export function beatGain(project: Project, recording = false): number {
-  return project.beatLevel * (recording || hasVocals(project) ? .5 : 1);
+/** Overlapping voice sections use the quieter backing level, never a summed gain. */
+export function beatGain(project: Project, recording = false, seconds = 0): number {
+  let level = Infinity;
+  for (const clip of project.vocals) {
+    if (seconds >= clip.startSeconds && seconds < clip.startSeconds + clip.durationSeconds) {
+      level = Math.min(level, clip.beatLevel ?? project.beatLevel);
+    }
+  }
+  return (level === Infinity ? project.beatLevel : level) * (recording || hasVocals(project) ? .5 : 1);
+}
+
+/** Shared gain changes keep playback, seeking and WAV export on the same section boundaries. */
+export function beatLevels(project: Project, recording = false): { start: number; gain: number }[] {
+  const times = [...new Set([0, ...project.vocals.flatMap(clip => [clip.startSeconds, clip.startSeconds + clip.durationSeconds])])].sort((a, b) => a - b);
+  const result: { start: number; gain: number }[] = [];
+  for (const start of times) {
+    const gain = beatGain(project, recording, start);
+    if (result.at(-1)?.gain !== gain) result.push({ start, gain });
+  }
+  return result;
 }
 
 export function validTake(take: Take): boolean {

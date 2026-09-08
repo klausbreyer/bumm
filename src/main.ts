@@ -11,12 +11,14 @@ import { MAX_PARTS, MAX_VOCALS, MAX_TAKE_SECONDS, MAX_START_SECONDS, activeCount
 import type { Project, Studio } from './music/project';
 import { BankClient } from './audio/bank-client';
 import { BrowserEngine } from './audio/browser-engine';
+import { listMicrophones, requestMicrophones } from './audio/microphone-inputs';
+import type { MicrophoneInput } from './audio/microphone-inputs';
 import { MicrophoneRecorder, microphoneError, RecordingCancelled } from './audio/microphone-recorder';
 import { TakeStore } from './storage/takes';
 import { decodeProject, encodeProject, MAX_PROJECT_BYTES, remapImported } from './storage/project-file';
 import { waveform } from './music/vocals';
 import type { Take } from './music/vocals';
-import { vocalWorkspace } from './ui/vocal-workspace';
+import { vocalWorkspace, recordingPanel } from './ui/vocal-workspace';
 import type { RecordingSession, WavePreview } from './ui/vocal-workspace';
 
 const STORAGE_KEY = 'bumm.studio.v3';
@@ -27,8 +29,16 @@ const takes = new TakeStore();
 const microphone = new MicrophoneRecorder();
 const waves = new Map<string, WavePreview>();
 let selectedVocalId: string | null = null;
+let voiceSetup = true;
 let cursor = 0;
 let headphones = false;
+let panel: 'beat' | 'voice' | null = null;
+let microphoneChoices: MicrophoneInput[] = [];
+let selectedMicrophone = '';
+let microphonesReady = false;
+let microphoneBusy = false;
+let microphoneErrorText = '';
+let deviceRefresh = 0;
 let recording: RecordingSession | null = null;
 let recordGeneration = 0;
 let playGeneration = 0;
@@ -58,7 +68,7 @@ function project(): Project { return studio.projects[studio.currentPack]; }
 function esc(value: string): string { return value.replace(/[&<>"']/g,char => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[char]!); }
 function disabled(value: boolean): string { return value ? 'disabled' : ''; }
 function time(seconds: number): string { const rounded=Math.round(seconds); return `${Math.floor(rounded/60)}:${String(rounded%60).padStart(2,'0')}`; }
-function locked(): boolean { return busy || fileBusy || recording !== null || audio.mode==='song'; }
+function locked(): boolean { return busy || fileBusy || microphoneBusy || recording !== null || audio.mode==='song'; }
 function save(): void {
   try { localStorage.setItem(STORAGE_KEY,JSON.stringify(studio)); saveState='saved'; }
   catch { saveState='unavailable'; }
@@ -137,35 +147,68 @@ function mixer(): string {
   </aside>`;
 }
 
+function microphonePicker(): string {
+  const active = microphone.activeInput;
+  const selected = microphoneChoices.find(device => device.id === selectedMicrophone);
+  const missing = Boolean(selectedMicrophone && !selected);
+  return `<div class="microphone-picker"><label for="microphone-input">Mikrofon</label><div class="microphone-select"><select id="microphone-input" data-focus="microphone-input" ${disabled(locked())}><option value="">Systemstandard</option>${missing ? `<option value="${esc(selectedMicrophone)}" selected>Gewähltes Mikrofon nicht verfügbar</option>` : ''}${microphoneChoices.map(device => `<option value="${esc(device.id)}" ${device.id===selectedMicrophone?'selected':''}>${esc(device.label)}</option>`).join('')}</select><button class="icon-button" data-action="refresh-microphones" aria-label="Mikrofone aktualisieren" ${disabled(locked())}>↻</button></div>${!microphonesReady?`<button class="action-button" data-action="allow-microphones" ${disabled(locked())}>${microphoneBusy?'Mikrofone werden geladen…':'Mikrofone freigeben'}</button>`:''}<p id="active-microphone" role="status">${active ? `Verwendet: ${esc(active.label)}` : selected ? `Ausgewählt: ${esc(selected.label)}` : 'Systemstandard. Der Gerätename erscheint bei der Aufnahme.'}</p>${missing?'<p class="microphone-error">Wähle ein verfügbares Mikrofon.</p>':''}${microphoneErrorText?`<p class="microphone-error" role="alert">${esc(microphoneErrorText)}</p>`:''}</div>`;
+}
+
+async function refreshMicrophones(requestPermission = false): Promise<void> {
+  const media = navigator.mediaDevices;
+  if (!media?.enumerateDevices || !media.getUserMedia) {
+    microphoneErrorText='Mikrofone benötigen HTTPS oder localhost und einen aktuellen Browser.';
+    render();return;
+  }
+  if (requestPermission && (microphoneBusy || recording)) return;
+  const generation=++deviceRefresh;
+  if (requestPermission) { microphoneBusy=true;render(); }
+  try {
+    const devices=await (requestPermission ? requestMicrophones(media) : listMicrophones(media));
+    if (generation!==deviceRefresh) return;
+    microphoneChoices=devices;microphoneErrorText='';
+    if (requestPermission || microphone.activeInput) microphonesReady=true;
+  } catch (error) {
+    if (generation===deviceRefresh) microphoneErrorText=microphoneError(error);
+  } finally {
+    if (requestPermission) microphoneBusy=false;
+    if (generation===deviceRefresh) render();
+  }
+}
+
 function beatEditor(): string {
   const p = project();
   const index = p.song.findIndex(part => part.id === editingId);
   const part = p.song[index];
   if (!part) return '';
   return `<section class="beat-editor" aria-label="Beat bearbeiten"><div class="section-heading"><h2>„${esc(part.name)}“ ändern</h2><div class="editor-heading-actions"><button class="action-button" data-action="preview-beat" ${disabled(busy||recording!==null||fileBusy)}> ${icon(audio.mode==='loops'?'stop':'play')} ${audio.mode==='loops'?'Beat stoppen':'Beat anhören'}</button><button class="action-button" data-action="finish-edit" ${disabled(locked())}>Fertig ${icon('check')}</button></div></div>
-    <div class="part-editor"><label>Name<input aria-label="Name des Songteils" maxlength="24" value="${esc(part.name)}" data-name="${esc(part.id)}" data-focus="part-name" ${disabled(locked())}></label><label>Länge<select data-bars="${esc(part.id)}" data-focus="part-bars" aria-label="Länge des Songteils" ${disabled(locked())}><option value="4" ${part.bars===4?'selected':''}>4 Takte</option><option value="8" ${part.bars===8?'selected':''}>8 Takte</option></select></label><div class="part-actions"><button class="action-button" data-action="move-left" data-id="${esc(part.id)}" aria-label="${esc(part.name)} nach links" ${disabled(locked()||index===0)}>← Links</button><button class="action-button" data-action="move-right" data-id="${esc(part.id)}" aria-label="${esc(part.name)} nach rechts" ${disabled(locked()||index===p.song.length-1)}>Rechts →</button><button class="action-button" data-action="copy-part" data-id="${esc(part.id)}" ${disabled(locked()||p.song.length>=MAX_PARTS)}>Kopieren</button><button class="action-button" data-action="delete-part" data-id="${esc(part.id)}" ${disabled(locked())}>Entfernen</button></div></div>
+    <div class="part-editor"><label>Name<span class="editable-name"><input aria-label="Name des Songteils" maxlength="24" value="${esc(part.name)}" data-name="${esc(part.id)}" data-focus="part-name" ${disabled(locked())}>${icon('edit')}</span></label><label>Länge<select data-bars="${esc(part.id)}" data-focus="part-bars" aria-label="Länge des Songteils" ${disabled(locked())}><option value="4" ${part.bars===4?'selected':''}>4 Takte</option><option value="8" ${part.bars===8?'selected':''}>8 Takte</option></select></label><div class="part-actions"><button class="action-button" data-action="move-left" data-id="${esc(part.id)}" aria-label="${esc(part.name)} nach links" ${disabled(locked()||index===0)}>← Links</button><button class="action-button" data-action="move-right" data-id="${esc(part.id)}" aria-label="${esc(part.name)} nach rechts" ${disabled(locked()||index===p.song.length-1)}>Rechts →</button><button class="action-button" data-action="copy-part" data-id="${esc(part.id)}" ${disabled(locked()||p.song.length>=MAX_PARTS)}>Duplizieren</button><button class="action-button" data-action="delete-part" data-id="${esc(part.id)}" ${disabled(locked())}>Entfernen</button></div></div>
     <div class="loop-workspace"><div class="pads-section"><div class="pad-grid">${PACKS[p.pack].loops.map(pad).join('')}</div></div>${mixer()}</div>
   </section>`;
 }
 
 function render(): void {
   if (!project().vocals.some(clip => clip.id === selectedVocalId)) selectedVocalId = null;
+  if (panel==='beat'&&!project().song.some(part=>part.id===editingId)) { panel=null;editingId=null; }
   const focused = document.activeElement instanceof HTMLElement ? document.activeElement.dataset.focus : undefined;
   const vocalScroll = document.querySelector('.vocal-scroll')?.scrollLeft ?? 0;
+  const panelScroll = document.querySelector('.panel-body')?.scrollTop ?? 0;
   const openPanels = [...document.querySelectorAll<HTMLDetailsElement>('details[data-panel][open]')].map(panel=>panel.dataset.panel);
   const p = project();
   const pack = PACKS[p.pack];
   app.innerHTML=`<div class="studio-shell song-view">
-    <header class="studio-toolbar"><span class="wordmark">BUMM<span>.</span></span><div class="project-title"><input id="project-name" data-focus="project-name" maxlength="48" aria-label="Name deines Tracks" value="${esc(p.name)}" ${disabled(locked())}>${icon('edit')}</div>
+    <header class="workspace-toolbar"><span class="wordmark">BUMM<span>.</span></span><div class="file-actions"><button class="action-button" data-action="save-project" aria-label="Projekt mit Aufnahmen sichern" ${disabled(busy||recording!==null||fileBusy)}>${icon('save')} Sichern</button><button class="action-button" data-action="load-project" aria-label="Projekt laden" ${disabled(busy||recording!==null||fileBusy)}>${icon('folder')} Laden</button><input id="project-file" class="sr-only" type="file" accept=".bumm,.json,application/json,application/octet-stream" aria-label="Projektdatei wählen" tabindex="-1"></div><span id="save-label" class="save-label"></span><label class="master-volume">${icon('volume')}<span class="sr-only">Abhörlautstärke</span><input type="range" id="master-volume" data-focus="master-volume" min="0" max="100" value="${masterVolume}"></label><button class="export-button" data-action="export-wav" data-focus="export-wav" aria-label="Song mit Beat und Stimme als WAV herunterladen" ${disabled(exporting||recording!==null||fileBusy||(!hasVocals(p)&&!p.song.some(part=>activeCount(part.mix))))}>${icon('down')} <span>${exporting?'Wird gebaut…':'Song herunterladen'}</span></button><button class="help-button" data-action="help" ${disabled(recording!==null||fileBusy)} aria-label="So geht BUMM">?</button></header>
+    <div class="studio-toolbar"><label class="project-title editable-name"><input id="project-name" data-focus="project-name" maxlength="48" aria-label="Name deines Tracks" value="${esc(p.name)}" ${disabled(locked())}>${icon('edit')}</label>
       <div class="pack-switch" aria-label="Soundset"><button data-action="pack" data-pack="hiphop" aria-pressed="${p.pack==='hiphop'}" class="${p.pack==='hiphop'?'active':''}" ${disabled(locked()||audio.mode!==null)}>Hip-Hop</button><button data-action="pack" data-pack="techno" aria-pressed="${p.pack==='techno'}" class="${p.pack==='techno'?'active':''}" ${disabled(locked()||audio.mode!==null)}>Techno</button></div>
       <div class="tempo-control"><button data-action="bpm-down" aria-label="Langsamer" ${disabled(locked()||audio.mode!==null||hasVocals(p)||p.bpm<=pack.minBpm)}>−</button><label><input type="number" id="bpm" data-focus="bpm" aria-label="Tempo in BPM" min="${pack.minBpm}" max="${pack.maxBpm}" value="${p.bpm}" ${disabled(locked()||audio.mode!==null||hasVocals(p))}><span>${hasVocals(p)?'BPM · FEST':'BPM'}</span></label><button data-action="bpm-up" aria-label="Schneller" ${disabled(locked()||audio.mode!==null||hasVocals(p)||p.bpm>=pack.maxBpm)}>+</button></div>
-    </header>
+    </div>
     <div class="studio-nav"><button class="play-button" data-action="play" data-focus="play" aria-label="${recording?'Aufnahme stoppen':audio.mode?'Wiedergabe stoppen':'Song starten'}" ${disabled(busy||fileBusy||(!recording&&!audio.mode&&!durationSeconds(p)))}>${icon(audio.mode||recording?'stop':'play')}<span>${recording||audio.mode?'Stopp':busy?'Lädt…':'Song anhören'}</span></button><div class="song-time"><span id="position-time">${time(cursor)}</span><span> / ${time(durationSeconds(p))}</span></div><button class="icon-button" data-action="rewind" aria-label="Zum Songanfang" ${disabled(locked()||audio.mode!==null)}>↤</button><div class="beat-display" aria-label="Taktanzeige"><span id="bar-label">TAKT 01</span><div class="beat-lights" aria-hidden="true"><i></i><i></i><i></i><i></i></div></div><button class="undo-button" data-action="undo" aria-label="Letzte Änderung rückgängig" ${disabled(!history.length||busy||recording!==null||fileBusy)}>${icon('undo')} <span>Zurück</span></button></div>
     <span id="playback-status" class="sr-only"></span>
-    <section class="arranger expanded" id="arranger" aria-label="Song-Arranger"><div class="arranger-heading"><div class="song-title-line"><h1>Dein Song</h1><span class="song-length">${p.song.length} Teile</span></div><button class="action-button" data-action="add-part" ${disabled(locked()||p.song.length>=MAX_PARTS)}>${icon('plus')} Beat anhängen</button></div>
-    ${vocalWorkspace(p,{editingId,selectedVocalId,session:recording,waves,locked:locked(),headphones,cursor,editor:beatEditor()})}</section>
-    <footer class="studio-footer"><div class="file-actions"><button class="action-button" data-action="save-project" aria-label="Projekt mit Aufnahmen sichern" ${disabled(busy||recording!==null||fileBusy)}>${icon('save')} Sichern</button><button class="action-button" data-action="load-project" aria-label="Projekt laden" ${disabled(busy||recording!==null||fileBusy)}>${icon('folder')} Laden</button><input id="project-file" class="sr-only" type="file" accept=".bumm,.json,application/json,application/octet-stream" aria-label="Projektdatei wählen" tabindex="-1"></div><span id="save-label" class="save-label"></span><label class="master-volume">${icon('volume')}<span class="sr-only">Abhörlautstärke</span><input type="range" id="master-volume" data-focus="master-volume" min="0" max="100" value="${masterVolume}"></label><button class="export-button" data-action="export-wav" data-focus="export-wav" aria-label="Song mit Beat und Stimme als WAV herunterladen" ${disabled(exporting||recording!==null||fileBusy||(!hasVocals(p)&&!p.song.some(part=>activeCount(part.mix))))}>${icon('down')} <span>${exporting?'Wird gebaut…':'Song herunterladen'}</span></button><button class="help-button" data-action="help" ${disabled(recording!==null||fileBusy)} aria-label="So geht BUMM">?</button></footer>
-    <dialog id="help-dialog"><div class="dialog-heading"><span class="wordmark">BUMM<span>.</span></span><button class="icon-button" data-action="close-help" aria-label="Hilfe schließen">${icon('close')}</button></div><h2>Dein Song, deine Stimme.</h2><ol><li><strong>Beats aufreihen</strong><p>Tippe auf einen Beat, um seine Sounds, Länge und Reihenfolge zu ändern.</p></li><li><strong>Song anhören</strong><p>Der weiße Strich zeigt, wo du bist. Wenn die Musik steht, setzt du die Position oben in der Taktleiste.</p></li><li><strong>Stimme aufnehmen</strong><p>Wähle, ob du Kopfhörer trägst. Ohne Kopfhörer bleibt die Begleitung stumm. Vier Schläge einzählen, dann singen. Deine Stimme darf über mehrere Beats laufen oder ganz allein stehen.</p></li></ol><p class="storage-help">Mit „Sichern“ hebst du dein Projekt samt Aufnahmen auf. „Song herunterladen“ speichert alles als WAV-Datei. Das Tempo bleibt nach einer Aufnahme fest. Neue Aufnahmen starten an der Abspiellinie. Wähle eine Aufnahme und „Neu aufnehmen“, um sie zu ersetzen. Beats verschieben oder löschen verändert deine Stimme nicht.</p><button class="play-button" data-action="close-help">Los geht’s ${icon('arrow')}</button></dialog>
+    <div class="workspace-body ${panel?'has-panel':''}"><section class="arranger expanded" id="arranger" aria-label="Song-Arranger"><div class="arranger-heading"><div class="song-title-line"><h1>Dein Song</h1><span class="song-length">${p.song.length} Teile</span></div><div class="arranger-actions"><button class="action-button voice-entry" data-action="open-voice" data-focus="voice-entry" aria-label="Stimme aufnehmen" aria-expanded="${panel==='voice'}" ${disabled(busy||fileBusy||microphoneBusy||recording!==null)}>${icon('mic')} Stimme aufnehmen</button><button class="action-button" data-action="add-part" ${disabled(locked()||p.song.length>=MAX_PARTS)}>${icon('plus')} Beat anhängen</button></div></div>
+    ${vocalWorkspace(p,{editingId,selectedVocalId,voiceSetup,session:recording,waves,locked:locked(),headphones,cursor,microphone:'',microphoneUnavailable:false})}</section>
+    ${panel ? `<aside class="work-panel" aria-label="${panel==='beat'?'Beat-Einstellungen':'Aufnahme-Einstellungen'}"><div class="panel-heading"><h2>${panel==='beat'?'Beat ändern':selectedVocalId&&!voiceSetup?'Aufnahme bearbeiten':'Deine Stimme'}</h2><button class="icon-button" data-action="close-panel" aria-label="Panel schließen" ${disabled(locked())}>${icon('close')}</button></div><div class="panel-body">${panel==='beat'?beatEditor():recordingPanel(p,{editingId,selectedVocalId,voiceSetup,session:recording,waves,locked:locked(),headphones,cursor,microphone:microphonePicker(),microphoneUnavailable:Boolean(selectedMicrophone&&!microphoneChoices.some(device=>device.id===selectedMicrophone))})}</div></aside>` : ''}</div>
+
+    <dialog id="help-dialog"><div class="dialog-heading"><span class="wordmark">BUMM<span>.</span></span><button class="icon-button" data-action="close-help" aria-label="Hilfe schließen">${icon('close')}</button></div><h2>Dein Song, deine Stimme.</h2><ol><li><strong>Beats aufreihen</strong><p>Tippe auf einen Beat, um seine Sounds, Länge und Reihenfolge rechts zu ändern.</p></li><li><strong>Song anhören</strong><p>Der weiße Strich zeigt, wo du bist. Wenn die Musik steht, setzt du die Position oben in der Taktleiste.</p></li><li><strong>Stimme aufnehmen</strong><p>Tippe auf die Stimmspur. Wähle rechts dein Mikrofon und ob du Kopfhörer trägst. Ohne Kopfhörer bleibt die Begleitung stumm. Vier Schläge einzählen, dann singen. Deine Stimme darf über mehrere Beats laufen oder ganz allein stehen.</p></li></ol><p class="storage-help">Mit „Sichern“ hebst du dein Projekt samt Aufnahmen auf. „Song herunterladen“ speichert alles als WAV-Datei. Das Tempo bleibt nach einer Aufnahme fest. Neue Aufnahmen starten an der Abspiellinie. Wähle eine Aufnahme und „Neu aufnehmen“, um sie zu ersetzen. Beats verschieben oder löschen verändert deine Stimme nicht.</p><button class="play-button" data-action="close-help">Los geht’s ${icon('arrow')}</button></dialog>
   </div>`;
   if (!document.querySelector('#toast')) {
     const toast=document.createElement('div'); toast.id='toast'; toast.setAttribute('role','status'); toast.setAttribute('aria-live','polite'); toast.hidden=true; document.body.append(toast);
@@ -173,6 +216,8 @@ function render(): void {
   updateSaveLabel();
   const timeline = document.querySelector('.vocal-scroll');
   if (timeline) timeline.scrollLeft = vocalScroll;
+  const panelBody=document.querySelector('.panel-body');
+  if (panelBody) panelBody.scrollTop=panelScroll;
   for (const panel of openPanels) app.querySelector<HTMLDetailsElement>(`details[data-panel="${panel}"]`)?.setAttribute('open','');
   if (focused) app.querySelector<HTMLElement>(`[data-focus="${CSS.escape(focused)}"]`)?.focus({ preventScroll:true });
   lastPosition='';
@@ -265,7 +310,11 @@ app.addEventListener('click',event=>{
   if (action==='cancel-record') { cancelRecording(); return; }
   if (action==='record') { if (recording) finishRecording(); else void recordVocal(); return; }
   if (action==='play'&&recording) { finishRecording(); return; }
-  if (recording||fileBusy) return;
+  if (recording||fileBusy||microphoneBusy) return;
+  if (action==='allow-microphones') { void refreshMicrophones(true);return; }
+  if (action==='refresh-microphones') { void refreshMicrophones();return; }
+  if (action==='close-panel') { if (audio.mode==='loops') audio.stop();panel=null;editingId=null;render();return; }
+  if (action==='open-voice'&&!busy) { if (audio.mode==='loops') audio.stop();panel='voice';editingId=null;selectedVocalId=null;voiceSetup=true;render();document.querySelector('.panel-body')?.scrollTo({top:0});return; }
   if (action==='play') { void play('song'); return; }
   if (action==='preview-beat') { void play('loops'); return; }
   if (action==='export-wav') { void exportWav(); return; }
@@ -274,7 +323,7 @@ app.addEventListener('click',event=>{
   if (action==='pack') {
     const pack=button.dataset.pack as PackId;
     if (pack===studio.currentPack) return;
-    audio.stop(); editingId=null; selectedVocalId=null; cursor=0;
+    audio.stop(); panel=null;editingId=null; selectedVocalId=null; cursor=0;
     mutate(()=>{studio.currentPack=pack;});
     void refreshWaves();
     announce(`${PACKS[pack].name}: dein eigener Track mit eigenen Sounds.`);
@@ -283,16 +332,16 @@ app.addEventListener('click',event=>{
   if (action==='undo') {
     const previous=history.pop();
     if (!previous) return;
-    audio.stop(); studio=previous; editingId=null; selectedVocalId=null; cursor=0; save(); render(); announce('Letzte Änderung rückgängig.'); return;
+    audio.stop(); studio=previous; editingId=null; selectedVocalId=null; panel=null;cursor=0; save(); render(); announce('Letzte Änderung rückgängig.'); return;
   }
   if (action==='save-project') { void saveProjectFile(); return; }
   if (action==='load-project') { document.querySelector<HTMLInputElement>('#project-file')!.click(); return; }
   if (locked()) return;
   if (action==='rewind') { cursor=0;selectedVocalId=null;render();return; }
-  if (action==='new-vocal') { selectedVocalId=null;render();return; }
-  if (action==='select-vocal') { selectedVocalId=id!;cursor=p.vocals.find(clip=>clip.id===id)?.startSeconds??cursor;render();return; }
+  if (action==='prepare-replacement'||action==='cancel-setup') { voiceSetup=action==='prepare-replacement';render();document.querySelector('.panel-body')?.scrollTo({top:0});return; }
+  if (action==='select-vocal') { if (audio.mode==='loops') audio.stop();panel='voice';editingId=null;selectedVocalId=id!;voiceSetup=false;cursor=p.vocals.find(clip=>clip.id===id)?.startSeconds??cursor;render();document.querySelector('.panel-body')?.scrollTo({top:0});return; }
   if (action==='remove-vocal') {
-    if (p.vocals.some(clip=>clip.id===selectedVocalId)) { mutate(()=>{p.vocals=p.vocals.filter(clip=>clip.id!==selectedVocalId);}); announce('Aufnahme entfernt. Mit Rückgängig holst du sie zurück.'); }
+    if (p.vocals.some(clip=>clip.id===selectedVocalId)) { panel=null;mutate(()=>{p.vocals=p.vocals.filter(clip=>clip.id!==selectedVocalId);}); announce('Aufnahme entfernt. Mit Rückgängig holst du sie zurück.'); }
     return;
   }
   if (action==='loop') {
@@ -306,7 +355,7 @@ app.addEventListener('click',event=>{
   if ((action==='bpm-down'||action==='bpm-up')&&!hasVocals(p)) {
     mutate(()=>{p.bpm+=action==='bpm-down'?-1:1;}); return;
   }
-  if (action==='finish-edit') { audio.stop();editingId=null;render();return; }
+  if (action==='finish-edit') { audio.stop();panel=null;editingId=null;render();return; }
   if (action==='add-part') {
     if (p.song.length>=MAX_PARTS) return;
     const newId=crypto.randomUUID();
@@ -317,10 +366,10 @@ app.addEventListener('click',event=>{
   const index=p.song.findIndex(part=>part.id===id);
   if (index<0) return;
   if (action==='edit-part') {
-    if (editingId===id) { audio.stop();editingId=null;render();return; }
-    editingId=id!;p.mix=clone(p.song[index].mix);render();
+    if (editingId===id) { audio.stop();panel=null;editingId=null;render();return; }
+    panel='beat';editingId=id!;p.mix=clone(p.song[index].mix);render();
     audio.setMix(p.mix);
-    document.querySelector('.beat-editor')?.scrollIntoView({block:'nearest'});
+    document.querySelector('.panel-body')?.scrollTo({top:0});
     announce(`Du bearbeitest jetzt „${p.song[index].name}“.`); return;
   }
   if (action==='move-left'||action==='move-right') {
@@ -348,7 +397,7 @@ app.addEventListener('input',event=>{
   if (input.id==='master-volume') { masterVolume=Number(input.value); audio.setVolume(masterVolume/100); return; }
   if (input.dataset.voiceControl&&!locked()) {
     const clip=project().vocals.find(clip=>clip.id===selectedVocalId);
-    if (input.dataset.voiceControl==='beat') project().beatLevel=Number(input.value)/100;
+    if (clip&&input.dataset.voiceControl==='beat') clip.beatLevel=Number(input.value)/100;
     if (clip&&input.dataset.voiceControl==='volume') clip.volume=Number(input.value)/100;
     if (clip&&input.dataset.voiceControl==='timing') {
       clip.shiftMs=Number(input.value);
@@ -378,6 +427,7 @@ app.addEventListener('input',event=>{
 app.addEventListener('change',event=>{
   const input=event.target as HTMLInputElement;
   if (input.id==='project-file') { void importProject(input); return; }
+  if (input.id==='microphone-input'&&!locked()) { selectedMicrophone=input.value;microphoneErrorText='';render();return; }
   if (input.name==='headphones'&&!locked()) { headphones=input.value==='yes';render();return; }
   if (input.id==='song-position'&&!locked()) { render();return; }
   if (input.dataset.clipPosition&&!locked()) {
@@ -438,7 +488,7 @@ async function importProject(input: HTMLInputElement): Promise<void> {
     const imported=remapImported(decoded.project,decoded.takes,()=>crypto.randomUUID());
     await takes.putAll(imported.takes);
     for (const take of imported.takes) waves.set(take.id,{peaks:waveform(take),seconds:take.samples.length/take.sampleRate});
-    editingId=null;selectedVocalId=null;cursor=0;
+    panel=null;editingId=null;selectedVocalId=null;cursor=0;
     mutate(()=>{studio.currentPack=imported.project.pack;studio.projects[imported.project.pack]=imported.project;});
     announce('Projekt samt Aufnahmen geladen. Dein vorheriger Stand bleibt über Rückgängig erreichbar.');
   } catch (error) { announce(error instanceof Error?error.message:'Diese Projektdatei konnte nicht geladen werden.',true); }
@@ -469,7 +519,9 @@ async function recordVocal(): Promise<void> {
   try {
     const context=await audio.unlock();
     if (generation!==recordGeneration) throw new RecordingCancelled();
-    await microphone.prepare(context,headphones);
+    await microphone.prepare(context,headphones,selectedMicrophone);
+    microphonesReady=true;
+    void refreshMicrophones();
     if (generation!==recordGeneration) throw new RecordingCancelled();
     const started=await audio.start(clone(owner),'song',{}, {recording:true,headphones,startSeconds,recordingSeconds:MAX_TAKE_SECONDS,onScheduled:schedule=>{
       if (generation!==recordGeneration) throw new RecordingCancelled();
@@ -485,9 +537,10 @@ async function recordVocal(): Promise<void> {
     await takes.putAll([take]);
     if (generation!==recordGeneration) throw new RecordingCancelled();
     waves.set(take.id,{peaks:waveform(take),seconds:take.samples.length/take.sampleRate});
-    const clip={id:clipId??crypto.randomUUID(),takeId:take.id,startSeconds,durationSeconds:take.samples.length/take.sampleRate,volume:selected?.volume??.9,shiftMs:0};
-    recording=null;selectedVocalId=clip.id;
+    const clip={id:clipId??crypto.randomUUID(),takeId:take.id,startSeconds,durationSeconds:take.samples.length/take.sampleRate,volume:selected?.volume??.9,beatLevel:selected?.beatLevel??owner.beatLevel,shiftMs:0};
+    recording=null;selectedVocalId=clip.id;voiceSetup=false;
     mutate(()=>{if (selected) owner.vocals[owner.vocals.indexOf(selected)]=clip;else owner.vocals.push(clip);});
+    document.querySelector('.panel-body')?.scrollTo({top:0});
     announce('Deine Stimme ist im Song. Die Beats bleiben unabhängig davon.');
   } catch (error) {
     if (generation===recordGeneration&&!(error instanceof RecordingCancelled)) announce(microphoneError(error),true);
@@ -497,7 +550,8 @@ async function recordVocal(): Promise<void> {
 }
 
 function cancelRecording(): void {
-  recordGeneration++; microphone.cancel(); audio.stop(); recording=null; render();
+  recordGeneration++; microphone.cancel(); audio.stop(); recording=null; voiceSetup=!selectedVocalId; render();
+  document.querySelector('.panel-body')?.scrollTo({top:0});
   announce('Aufnahme abgebrochen. Deine vorige Aufnahme bleibt erhalten.');
 }
 
@@ -546,3 +600,6 @@ audio.onStop=reason=>{
 };
 render();
 void refreshWaves();
+
+void refreshMicrophones();
+navigator.mediaDevices?.addEventListener('devicechange',()=>{ if (!microphoneBusy) void refreshMicrophones(); });

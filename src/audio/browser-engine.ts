@@ -3,7 +3,7 @@ import type { LoopId, Role } from '../music/catalog';
 import { MASTER_GAIN } from '../music/render';
 import { clone, nextBarTime, partAtBar, durationSeconds, MAX_TAKE_SECONDS } from '../music/project';
 import type { Mix, Project } from '../music/project';
-import { beatGain, requireTakes, VOCAL_GAIN, timelinePlacement } from '../music/vocals';
+import { beatGain, beatLevels, requireTakes, VOCAL_GAIN, timelinePlacement } from '../music/vocals';
 import type { TakeLibrary } from '../music/vocals';
 import { BankClient } from './bank-client';
 
@@ -83,9 +83,17 @@ export class BrowserEngine {
     if (mode === 'loops') this.scheduleMix(project.mix, this.scheduledStart, false);
     else {
       let bar = 0;
+      const levels = beatLevels(project, options.recording);
       for (const part of project.song) {
         const end = (bar + part.bars) * this.barDuration;
-        if (end > this.from) this.scheduleMix(part.mix, Math.max(this.scheduledStart, this.startTime + bar * this.barDuration), false);
+        const start = Math.max(this.from, bar * this.barDuration);
+        if (end > start) {
+          const boundaries = [start, ...levels.filter(level => level.start > start && level.start < end).map(level => level.start)];
+          for (const seconds of boundaries) {
+            this.backingGain = options.recording && !options.headphones ? 0 : beatGain(project, options.recording, seconds);
+            this.scheduleMix(part.mix, this.startTime + seconds, false);
+          }
+        }
         bar += part.bars;
       }
       const beatsEnd = Math.max(this.scheduledStart, this.startTime + bar * this.barDuration);

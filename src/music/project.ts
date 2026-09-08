@@ -10,7 +10,7 @@ export interface Mix {
   levels: Record<Role, number>;
 }
 export interface VocalClip { takeId: string; volume: number; shiftMs: number }
-export interface TimelineVocal extends VocalClip { id: string; startSeconds: number; durationSeconds: number }
+export interface TimelineVocal extends VocalClip { id: string; startSeconds: number; durationSeconds: number; beatLevel?: number }
 export interface SongPart { id: string; name: string; bars: 4 | 8; mix: Mix }
 export interface Project { version: 3; pack: PackId; name: string; bpm: number; beatLevel: number; mix: Mix; song: SongPart[]; vocals: TimelineVocal[] }
 export interface Studio { version: 3; currentPack: PackId; projects: Record<PackId, Project> }
@@ -88,6 +88,7 @@ export function validProject(value: unknown, pack: PackId): value is Project {
   const vocalIds = new Set<string>();
   if (!value.vocals.every(clip => {
     if (!record(clip) || !validVocal(clip) || typeof clip.id !== 'string' || !clip.id || clip.id.length > 64 || vocalIds.has(clip.id)) return false;
+    if (clip.beatLevel !== undefined && (typeof clip.beatLevel !== 'number' || !Number.isFinite(clip.beatLevel) || clip.beatLevel < 0 || clip.beatLevel > 1)) return false;
     vocalIds.add(clip.id);
     return typeof clip.startSeconds === 'number' && Number.isFinite(clip.startSeconds) && clip.startSeconds >= 0 && clip.startSeconds <= MAX_START_SECONDS
       && typeof clip.durationSeconds === 'number' && Number.isFinite(clip.durationSeconds) && clip.durationSeconds > 0 && clip.durationSeconds <= MAX_TAKE_SECONDS;

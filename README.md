@@ -35,13 +35,26 @@ For the initial release before the first PR is merged, `PAGES_BOOTSTRAP_SHA` can
 
 The studio opens with **Dein Song**. Beats appear in order above an independent
 voice track. Select a beat to change its sounds, name, length or position in the
-editor below the timeline. Beats can be copied or removed. **Beat anhängen**
-adds a beat with the current mix. **Fertig** closes the editor.
+panel on the right. The beat editor and recording controls share this panel.
+Only one opens at a time. The timeline stays visible while the panel scrolls. Beats can be copied or removed. **Beat anhängen**
+adds a beat with the current mix. **Fertig** closes the editor. Track and beat
+names have a visible border and pencil icon; click the field to rename them.
 
 **Song anhören** plays the arrangement. A white line shows the current position
 across both tracks. While stopped, use the ruler to choose a playback or
 recording position. The arrow beside the clock returns to the start. The
 **Beat anhören** button in the editor previews its mix in a loop.
+
+**Stimme aufnehmen**, beside **Beat anhängen**, opens the recording panel.
+This button stays visible when the track already contains recordings. Select
+a voice clip to edit its mix, adjust its timing or delete it. Microphone and
+headphone controls appear only when preparing a recording.
+Choose a microphone from the list. **Mikrofone freigeben** requests permission
+so BUMM can show device names. It releases the temporary microphone stream
+without recording. During capture, **Verwendet** shows the active track's name.
+The picker stays locked until recording ends. A missing selected microphone
+causes an error instead of switching to another device. Device changes update
+the list. **Systemstandard** follows the browser's default input.
 
 Choose whether you wear headphones before recording. **Nein** is the default:
 backing audio and count-in clicks stay silent, while the count and playhead
@@ -56,11 +69,17 @@ alone without beats. A project can contain eight recordings. Each clip has its
 own time position. Moving, copying, shortening or deleting beats leaves vocals
 in place.
 
-Select an existing recording and press **Neu aufnehmen** to replace it.
-**Abbrechen** preserves the previous take. **Neue Aufnahme** clears the selection
-so the next recording creates a separate clip at the cursor. Overlapping clips
-play together. In **Stimme & Beat mischen**, adjust volume, position, playback
-length and timing, or remove a recording. Changes can be undone. Shortening a
+Select an existing recording and press **Neu aufnehmen** to prepare a replacement.
+Then press **Aufnahme starten**. **Zurück** leaves setup; **Abbrechen** cancels
+capture. Both preserve the previous take. **Aufnahme löschen** removes the
+selected clip and closes the panel. Undo restores it. To create a separate
+clip at the cursor, use **Stimme aufnehmen** beside **Beat anhängen**.
+Overlapping clips play together. Use **Stimme & Beat mischen** in the recording panel to adjust the selected
+voice clip and its backing beat. The beat setting applies only from that
+clip’s start to its end. Overlapping clips use the quieter beat setting.
+Outside these sections, the original project mix remains unchanged. Older
+projects retain their mix until you adjust a section. Position, playback length, timing and removal stay in the recording
+panel. Changes can be undone. Shortening a
 voice clip preserves its full audio, including in saved project files.
 
 Recordings use mono PCM in IndexedDB. Metadata lives under `bumm.studio.v3`.
@@ -68,7 +87,9 @@ Existing v1 and v2 projects migrate on load. Older part-bound vocals retain
 their original start times, playback windows, volume and timing adjustment.
 Their full recorded audio remains available. Each genre has a separate project.
 
-**Sichern** downloads a `.bumm` file with metadata and lossless audio. **Laden**
+The top toolbar contains project files, save status, listening volume,
+WAV export and help. **Sichern** downloads a `.bumm` file with metadata and
+lossless audio. **Laden**
 also accepts older project files. **Song herunterladen** exports beats and
 vocals as stereo WAV. Recordings never leave the device unless the user
 downloads and shares a file. Old takes remain in storage for undo.

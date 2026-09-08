@@ -29,6 +29,11 @@ spinners. They cost battery and frames.
 Keep controls obvious, touch targets usable and German copy short. A wide
 screen gives the same studio more room. Judge a UI change on the phone first.
 Do not add configuration switches to compensate for confusing behavior.
+Keep the timeline visible on laptop and iPad screens. Beat editing and
+recording share one panel, with its own scroll area. Do not stack editors
+below the timeline. Keep the recording entry visible even when voice clips
+already exist. Voice and backing levels belong to the selected recording
+section, not to the top toolbar.
 
 ### 4. A recording must survive an edit
 

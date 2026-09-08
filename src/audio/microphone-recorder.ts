@@ -18,7 +18,7 @@ export class MicrophoneRecorder {
   onLevel: (level: number) => void = () => {};
   onInterrupted: () => void = () => {};
 
-  async prepare(context: AudioContext): Promise<void> {
+  async prepare(context: AudioContext, headphones = true): Promise<void> {
     this.cancel();
     const generation = this.generation;
     if (!navigator.mediaDevices?.getUserMedia || !context.audioWorklet) throw new Error('Für Aufnahmen braucht BUMM HTTPS oder localhost und einen aktuellen Browser.');
@@ -57,7 +57,7 @@ export class MicrophoneRecorder {
       };
       // Device values are estimates. Per-take timing adjustment remains available.
       const input = (stream.getAudioTracks()[0].getSettings() as MediaTrackSettings & { latency?: number }).latency ?? 0;
-      this.compensation = Math.min(.5, Math.max(0, (context.baseLatency || 0) + (context.outputLatency || 0) + input));
+      this.compensation = Math.min(.5, Math.max(0, (headphones ? (context.baseLatency || 0) + (context.outputLatency || 0) : 0) + input));
     } catch (error) { if (generation === this.generation) this.cleanup(); throw error; }
   }
 

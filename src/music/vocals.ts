@@ -1,7 +1,7 @@
-import type { Project, VocalClip } from './project';
-import { hasVocals, takeIds } from './project';
+import type { Project, VocalClip, TimelineVocal } from './project';
+import { hasVocals, takeIds, MAX_TAKE_SECONDS } from './project';
 
-export const MAX_TAKE_SECONDS = 30;
+export { MAX_TAKE_SECONDS } from './project';
 export const VOCAL_GAIN = .48;
 export interface Take { id: string; sampleRate: number; samples: Float32Array<ArrayBuffer> }
 export type TakeLibrary = Record<string, Take>;
@@ -34,7 +34,7 @@ export function prepareTake(id: string, sampleRate: number, samples: Float32Arra
   return take;
 }
 
-/** Both live playback and export trim shifted takes at the song-part boundaries. */
+/** Timing adjustment trims at the clip window, independent of beat boundaries. */
 export function vocalPlacement(clip: VocalClip, take: Take, partSeconds: number): { start: number; offset: number; duration: number } {
   const shift = clip.shiftMs / 1000;
   const start = Math.max(0, shift);
@@ -57,4 +57,12 @@ export function waveform(take: Take, count = 64): number[] {
     for (let i = Math.floor(bar * stride); i < Math.floor((bar + 1) * stride); i++) peak = Math.max(peak, Math.abs(take.samples[i]));
     return peak;
   });
+}
+
+/** Absolute song placement shared by Web Audio and WAV export, including seeking. */
+export function timelinePlacement(clip: TimelineVocal, take: Take, from = 0): { start: number; offset: number; duration: number } {
+  const placement = vocalPlacement(clip, take, clip.durationSeconds);
+  const originalStart = clip.startSeconds + placement.start;
+  const skipped = Math.max(0, from - originalStart);
+  return { start: Math.max(from, originalStart), offset: placement.offset + skipped, duration: Math.max(0, placement.duration - skipped) };
 }

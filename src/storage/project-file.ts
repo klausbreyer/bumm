@@ -1,4 +1,4 @@
-import { clone, MAX_PARTS, parseProject, takeIds } from '../music/project';
+import { clone, MAX_VOCALS, parseProject, takeIds } from '../music/project';
 import type { Project } from '../music/project';
 import { MAX_TAKE_SECONDS, requireTakes, validTake } from '../music/vocals';
 import type { Take, TakeLibrary } from '../music/vocals';
@@ -41,7 +41,7 @@ export function decodeProject(input: ArrayBuffer): { project: Project; takes: Ta
   if (jsonSize > 250_000 || 12 + jsonSize > input.byteLength) throw new Error('Die Projektdatei ist beschädigt.');
   const manifest = JSON.parse(new TextDecoder().decode(new Uint8Array(input, 12, jsonSize))) as Manifest;
   const project = parseProject(manifest?.project);
-  if (!project || !Array.isArray(manifest.takes) || manifest.takes.length > MAX_PARTS) throw new Error('Die Projektdatei ist nicht lesbar.');
+  if (!project || !Array.isArray(manifest.takes) || manifest.takes.length > MAX_VOCALS) throw new Error('Die Projektdatei ist nicht lesbar.');
   const ids = new Set<string>();
   let offset = 12 + jsonSize;
   const takes: Take[] = manifest.takes.map(meta => {
@@ -63,6 +63,6 @@ export function decodeProject(input: ArrayBuffer): { project: Project; takes: Ta
 export function remapImported(project: Project, takes: Take[], newId: () => string): { project: Project; takes: Take[] } {
   const copy = clone(project);
   const ids = new Map(takes.map(take => [take.id, newId()]));
-  for (const part of copy.song) if (part.vocal) part.vocal.takeId = ids.get(part.vocal.takeId)!;
+  for (const clip of copy.vocals) clip.takeId = ids.get(clip.takeId)!;
   return { project: copy, takes: takes.map(take => ({ ...take, id: ids.get(take.id)! })) };
 }

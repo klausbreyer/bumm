@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import { createContext, runInContext } from 'node:vm';
 import 'fake-indexeddb/auto';
 import { CaptureWindow } from '../src/music/capture';
-import { clone, hasVocals, makeProject, makeStudio, parseProject, parseStudio } from '../src/music/project';
+import { makeProject, makeStudio, parseProject, parseStudio } from '../src/music/project';
 import { prepareTake, vocalPlacement, waveform } from '../src/music/vocals';
 import type { Take } from '../src/music/vocals';
 import { renderBank, renderWav } from '../src/music/render';
@@ -76,18 +76,17 @@ describe('Microphone capture', () => {
 describe('Portable vocal projects', () => {
   test('legacy projects and studio storage migrate without losing arrangements', () => {
     const current = makeProject('hiphop');
-    const legacy = { ...current, version: 1, song: current.song.map(({ vocal: _vocal, ...part }) => part) };
-    expect(parseProject(legacy)?.song.every(part => part.vocal === null)).toBe(true);
+    const legacy = { ...current, version: 1, song: current.song };
+    expect(parseProject(legacy)?.vocals).toEqual([]);
     expect(parseProject(legacy)?.song.map(part => part.id)).toEqual(current.song.map(part => part.id));
     const studio = makeStudio();
-    expect(parseStudio(JSON.stringify({ ...studio, version: 1, projects: { ...studio.projects, hiphop: legacy } }))?.version).toBe(2);
+    expect(parseStudio(JSON.stringify({ ...studio, version: 1, projects: { ...studio.projects, hiphop: legacy } }))?.version).toBe(3);
   });
 
-  test('a project bundle contains exact audio once, even when a refrain is copied', () => {
+  test('a project bundle stores shared audio once for multiple voice clips', () => {
     const project = makeProject('hiphop');
     const take = fixture();
-    project.song[1].vocal = { takeId: take.id, volume: .8, shiftMs: -20 };
-    project.song[2].vocal = clone(project.song[1].vocal);
+    project.vocals = [{ id: 'one', takeId: take.id, startSeconds: 0, durationSeconds: 1, volume: .8, shiftMs: -20 }, { id: 'two', takeId: take.id, startSeconds: 3, durationSeconds: 1, volume: .8, shiftMs: -20 }];
     const decoded = decodeProject(encodeProject(project, { [take.id]: take }));
     expect(decoded.project).toEqual(project);
     expect(decoded.takes).toHaveLength(1);
@@ -96,17 +95,17 @@ describe('Portable vocal projects', () => {
 
   test('imported recordings cannot overwrite recordings with the same ID', () => {
     const project = makeProject('hiphop');
-    project.song[0].vocal = { takeId: 'take-one', volume: .8, shiftMs: 0 };
+    project.vocals = [{ id: 'one', takeId: 'take-one', startSeconds: 0, durationSeconds: 1, volume: .8, shiftMs: 0 }];
     const imported = remapImported(project, [fixture()], () => 'new-id');
-    expect(imported.project.song[0].vocal?.takeId).toBe('new-id');
+    expect(imported.project.vocals[0].takeId).toBe('new-id');
     expect(imported.takes[0].id).toBe('new-id');
-    expect(project.song[0].vocal?.takeId).toBe('take-one');
+    expect(project.vocals[0].takeId).toBe('take-one');
   });
 
   test('missing audio and truncated or invalid bundles fail without silently losing vocals', () => {
     const project = makeProject('hiphop');
     const take = fixture();
-    project.song[0].vocal = { takeId: take.id, volume: .8, shiftMs: 0 };
+    project.vocals = [{ id: 'one', takeId: take.id, startSeconds: 0, durationSeconds: 1, volume: .8, shiftMs: 0 }];
     expect(() => encodeProject(project, {})).toThrow('Aufnahme fehlt');
     const encoded = encodeProject(project, { [take.id]: take });
     expect(() => decodeProject(encoded.slice(0, encoded.byteLength - 4))).toThrow();
@@ -136,26 +135,6 @@ describe('Portable vocal projects', () => {
 describe('Voice and beat alignment', () => {
   const bank = renderBank('hiphop', 92, 8000);
 
-  test('moving a song part moves its voice and undo restores its original position', () => {
-    const project = makeProject('hiphop');
-    project.beatLevel = 0;
-    const take = fixture();
-    project.song[1].vocal = { takeId: take.id, volume: 1, shiftMs: 0 };
-    const previous = clone(project);
-    const sample = (wav: ArrayBuffer, seconds: number) => new DataView(wav).getInt16(44 + Math.round(seconds * bank.sampleRate) * 4, true);
-    const offset = project.song[0].bars * bank.frames / bank.sampleRate / 4;
-    const original = renderWav(project, bank, { [take.id]: take });
-    expect(sample(original, .125)).toBe(0);
-    expect(Math.abs(sample(original, offset + .125))).toBeGreaterThan(1000);
-    [project.song[0], project.song[1]] = [project.song[1], project.song[0]];
-    const moved = renderWav(project, bank, { [take.id]: take });
-    expect(Math.abs(sample(moved, .125))).toBeGreaterThan(1000);
-    expect(renderWav(previous, bank, { [take.id]: take })).toEqual(original);
-    expect(hasVocals(project)).toBe(true);
-    project.song[0].vocal = null;
-    expect(hasVocals(project)).toBe(false);
-  });
-
   test('positive timing delays voice; negative timing trims the beginning', () => {
     const take = fixture();
     const clip = { takeId: take.id, volume: 1, shiftMs: 100 };
@@ -169,7 +148,7 @@ describe('Voice and beat alignment', () => {
     project.beatLevel = 0;
     project.song = [project.song[0]];
     const take: Take = { id: 'resampled', sampleRate: 16000, samples: new Float32Array(16000).fill(.5) };
-    project.song[0].vocal = { takeId: take.id, volume: .5, shiftMs: 100 };
+    project.vocals = [{ id: 'one', takeId: take.id, startSeconds: 0, durationSeconds: 2, volume: .5, shiftMs: 100 }];
     const view = new DataView(renderWav(project, bank, { [take.id]: take }));
     const sample = (seconds: number) => view.getInt16(44 + Math.round(seconds * 8000) * 4, true);
     expect(sample(.05)).toBe(0);

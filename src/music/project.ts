@@ -2,14 +2,18 @@ import { PACKS, ROLES } from './catalog';
 import type { LoopId, PackId, Role } from './catalog';
 
 export const MAX_PARTS = 8;
+export const MAX_VOCALS = 8;
+export const MAX_TAKE_SECONDS = 120;
+export const MAX_START_SECONDS = 600;
 export interface Mix {
   loops: Record<Role, LoopId | null>;
   levels: Record<Role, number>;
 }
 export interface VocalClip { takeId: string; volume: number; shiftMs: number }
-export interface SongPart { id: string; name: string; bars: 4 | 8; mix: Mix; vocal: VocalClip | null }
-export interface Project { version: 2; pack: PackId; name: string; bpm: number; beatLevel: number; mix: Mix; song: SongPart[] }
-export interface Studio { version: 2; currentPack: PackId; projects: Record<PackId, Project> }
+export interface TimelineVocal extends VocalClip { id: string; startSeconds: number; durationSeconds: number }
+export interface SongPart { id: string; name: string; bars: 4 | 8; mix: Mix }
+export interface Project { version: 3; pack: PackId; name: string; bpm: number; beatLevel: number; mix: Mix; song: SongPart[]; vocals: TimelineVocal[] }
+export interface Studio { version: 3; currentPack: PackId; projects: Record<PackId, Project> }
 
 export function clone<T>(value: T): T { return structuredClone(value); }
 
@@ -24,21 +28,21 @@ export function makeProject(pack: PackId): Project {
   const beat = clone(mix);
   beat.loops.hook = null;
   return {
-    version: 2, pack, name: PACKS[pack].projectName, bpm: PACKS[pack].bpm, beatLevel: 1, mix,
+    version: 3, pack, name: PACKS[pack].projectName, bpm: PACKS[pack].bpm, beatLevel: 1, mix, vocals: [],
     song: [
-      { id: 'intro', name: 'Intro', bars: 4, mix: intro, vocal: null },
-      { id: 'beat', name: 'Strophe', bars: 8, mix: beat, vocal: null },
-      { id: 'hook', name: 'Refrain', bars: 8, mix: clone(mix), vocal: null },
+      { id: 'intro', name: 'Intro', bars: 4, mix: intro },
+      { id: 'beat', name: 'Strophe', bars: 8, mix: beat },
+      { id: 'hook', name: 'Refrain', bars: 8, mix: clone(mix) },
     ],
   };
 }
 
 export function makeStudio(): Studio {
-  return { version: 2, currentPack: 'hiphop', projects: { hiphop: makeProject('hiphop'), techno: makeProject('techno') } };
+  return { version: 3, currentPack: 'hiphop', projects: { hiphop: makeProject('hiphop'), techno: makeProject('techno') } };
 }
 
-export function hasVocals(project: Project): boolean { return project.song.some(part => part.vocal !== null); }
-export function takeIds(project: Project): string[] { return [...new Set(project.song.flatMap(part => part.vocal ? [part.vocal.takeId] : []))]; }
+export function hasVocals(project: Project): boolean { return project.vocals.length > 0; }
+export function takeIds(project: Project): string[] { return [...new Set(project.vocals.map(clip => clip.takeId))]; }
 
 /** One loop per musical role keeps the combinations understandable and in tune. */
 export function toggleLoop(mix: Mix, role: Role, id: LoopId): Mix {
@@ -49,7 +53,7 @@ export function toggleLoop(mix: Mix, role: Role, id: LoopId): Mix {
 
 export function activeCount(mix: Mix): number { return ROLES.filter(role => mix.loops[role]).length; }
 export function totalBars(project: Project): number { return project.song.reduce((sum, part) => sum + part.bars, 0); }
-export function durationSeconds(project: Project): number { return totalBars(project) * 240 / project.bpm; }
+export function durationSeconds(project: Project): number { return Math.max(totalBars(project) * 240 / project.bpm, ...project.vocals.map(clip => clip.startSeconds + clip.durationSeconds)); }
 
 export function partAtBar(song: SongPart[], bar: number): number {
   let end = 0;
@@ -75,17 +79,25 @@ function validMix(value: unknown, pack: PackId): value is Mix {
 }
 
 export function validProject(value: unknown, pack: PackId): value is Project {
-  if (!record(value) || value.version !== 2 || value.pack !== pack) return false;
+  if (!record(value) || value.version !== 3 || value.pack !== pack) return false;
   if (typeof value.beatLevel !== 'number' || !Number.isFinite(value.beatLevel) || value.beatLevel < 0 || value.beatLevel > 1) return false;
   if (typeof value.name !== 'string' || value.name.length > 48 || !value.name.trim()) return false;
   if (typeof value.bpm !== 'number' || !Number.isInteger(value.bpm) || value.bpm < PACKS[pack].minBpm || value.bpm > PACKS[pack].maxBpm) return false;
   if (!validMix(value.mix, pack) || !Array.isArray(value.song) || value.song.length > MAX_PARTS) return false;
+  if (!Array.isArray(value.vocals) || value.vocals.length > MAX_VOCALS) return false;
+  const vocalIds = new Set<string>();
+  if (!value.vocals.every(clip => {
+    if (!record(clip) || !validVocal(clip) || typeof clip.id !== 'string' || !clip.id || clip.id.length > 64 || vocalIds.has(clip.id)) return false;
+    vocalIds.add(clip.id);
+    return typeof clip.startSeconds === 'number' && Number.isFinite(clip.startSeconds) && clip.startSeconds >= 0 && clip.startSeconds <= MAX_START_SECONDS
+      && typeof clip.durationSeconds === 'number' && Number.isFinite(clip.durationSeconds) && clip.durationSeconds > 0 && clip.durationSeconds <= MAX_TAKE_SECONDS;
+  })) return false;
   const ids = new Set<string>();
   return value.song.every(part => {
     if (!record(part) || typeof part.id !== 'string' || !part.id || part.id.length > 64 || ids.has(part.id)) return false;
     ids.add(part.id);
     return typeof part.name === 'string' && part.name.trim().length > 0 && part.name.length <= 24
-      && (part.bars === 4 || part.bars === 8) && validMix(part.mix, pack) && validVocal(part.vocal);
+      && (part.bars === 4 || part.bars === 8) && validMix(part.mix, pack);
   });
 }
 
@@ -96,21 +108,37 @@ function validVocal(value: unknown): value is VocalClip | null {
     && typeof value.shiftMs === 'number' && Number.isInteger(value.shiftMs) && Math.abs(value.shiftMs) <= 250);
 }
 
-/** Upgrade beat-only files without changing their existing parts or mixes. */
+/** Old part-bound vocals keep their timing and playback window on the independent track. */
 export function parseProject(value: unknown): Project | null {
   if (!record(value) || (value.pack !== 'hiphop' && value.pack !== 'techno')) return null;
-  const upgraded = value.version === 1 && Array.isArray(value.song)
-    ? { ...value, version: 2, beatLevel: 1, song: value.song.map(part => record(part) ? { ...part, vocal: null } : part) }
-    : value;
+  let upgraded = value;
+  if (value.version === 1 || value.version === 2) {
+    if (!Array.isArray(value.song) || typeof value.bpm !== 'number' || value.bpm <= 0) return null;
+    const vocals: TimelineVocal[] = [];
+    let startSeconds = 0;
+    const song = [];
+    for (const part of value.song) {
+      if (!record(part) || (part.bars !== 4 && part.bars !== 8)) return null;
+      const durationSeconds = part.bars * 240 / value.bpm;
+      if (value.version === 2) {
+        if (!validVocal(part.vocal)) return null;
+        if (part.vocal) vocals.push({ ...part.vocal, id: `legacy-${song.length}`, startSeconds, durationSeconds });
+      }
+      const { vocal: _vocal, ...beat } = part;
+      song.push(beat);
+      startSeconds += durationSeconds;
+    }
+    upgraded = { ...value, version: 3, beatLevel: value.version === 1 ? 1 : value.beatLevel, song, vocals };
+  }
   return validProject(upgraded, value.pack) ? upgraded : null;
 }
 
 export function parseStudio(serialized: string): Studio | null {
   try {
     const value: unknown = JSON.parse(serialized);
-    if (!record(value) || (value.version !== 1 && value.version !== 2) || (value.currentPack !== 'hiphop' && value.currentPack !== 'techno') || !record(value.projects)) return null;
+    if (!record(value) || ![1, 2, 3].includes(value.version as number) || (value.currentPack !== 'hiphop' && value.currentPack !== 'techno') || !record(value.projects)) return null;
     const hiphop = parseProject(value.projects.hiphop);
     const techno = parseProject(value.projects.techno);
-    return hiphop?.pack === 'hiphop' && techno?.pack === 'techno' ? { version: 2, currentPack: value.currentPack, projects: { hiphop, techno } } : null;
+    return hiphop?.pack === 'hiphop' && techno?.pack === 'techno' ? { version: 3, currentPack: value.currentPack, projects: { hiphop, techno } } : null;
   } catch { return null; }
 }

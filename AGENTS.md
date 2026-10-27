@@ -130,8 +130,8 @@ Before you call a behavior change done, check the applicable paths.
   verifying the committed dependency set.
 - `make start` installs dependencies, starts Vite at `http://127.0.0.1:4176`
   and opens the browser. That port is Klaus's. For agent checks, use a free
-  port with `make start PORT=<port> OPEN=` and leave the browser closed unless
-  authorized. `bun run dev` starts only Vite.
+  port with `make start PORT=<port> OPEN=` and use an isolated test browser. `bun run
+  dev` starts only Vite.
 - `bun run build` checks TypeScript and creates the static build in `dist/`.
 - `bun run preview` serves that build on port 4176.
 - Development uses `/`. Builds and previews use `/bumm/`, including workers,
@@ -139,8 +139,10 @@ Before you call a behavior change done, check the applicable paths.
 - Browser tests build the app and start a separate preview server on port 4177.
   `PLAYWRIGHT_BASE_URL` selects an existing server. Never point tests at the
   live site without explicit instructions.
-- Use installed CLIs first. Ask before installing missing tools or using a
-  browser, including browser automation.
+- Use installed CLIs first. Ask before installing missing tools. Own isolated browsers
+  for tests and previews need no further approval.
+  Ask before using the user's personal browser context or accounts, and use
+  Chrome exclusively for that access.
 - Stop what you started, by the PID you tracked.
 
 ## Test data
@@ -155,27 +157,26 @@ Before you call a behavior change done, check the applicable paths.
 
 - **Write the failing test first** for a behavior change that needs a test.
 - Test music, recording and storage behavior with unit tests under `tests/`.
-  Test user workflows through Playwright under `tests/browser/` when browser
-  automation is authorized.
+  Test user workflows through Playwright under `tests/browser/` with isolated test contexts.
 - Wait for the relevant UI and audio state before acting in a browser test.
   Do not replace readiness checks with arbitrary delays.
 - A test that creates state outside its own scope clears it. This includes
   storage, workers, audio contexts, microphone streams and application globals.
 - Before a pull request with code changes, run `bun run test` and
-  `bun run build`. Run `bun run test:browser` when authorized. CI runs unit
+  `bun run build`. Run `bun run test:browser` in its isolated test context. CI runs unit
   tests and browser tests, and the browser command includes the build.
 - Treat a CI-only failure as a possible ordering or timing race. Investigate
   state contamination and reproduce suspected timing races under CPU load.
   Rerunning proves nothing.
-- Finish a UI change with visual checks at phone and desktop sizes when browser
-  use is authorized. State any checks you could not run.
+- Finish a UI change with visual checks at phone and desktop sizes in an isolated
+  browser. State any checks you could not run.
 - Do not claim microphone or native support from simulated tests alone.
   `README.md` records the current hardware verification limits.
 
 ## Pull requests
 
-- For implementation work, create a branch from `main` in a worktree named
-  `../worktrees/<repo-folder-name>-<slug>`. Never commit on `main`.
+- For implementation work, create a branch from `main`.
+  Follow the global worktree location and session rules. Never commit on `main`.
   Use EnterWorktree or an equivalent session mechanism when available.
   Otherwise set the worktree as the working directory for every command.
 - Keep at most ten registered worktrees. Never force a removal or remove a
@@ -183,15 +184,13 @@ Before you call a behavior change done, check the applicable paths.
 - Use `feature/<slug>` for a user-facing capability, a change across several
   modules, or work that will need more than two commits. Use a short branch name
   for anything smaller.
-- Branch names, commits and pull request text are English. Add no agent
-  co-author or generation trailer to commits.
+- Branch names, commits and pull request text are English. Do not add agent
+  co-author trailers. End commits with the global model and harness attribution.
 - Pull the latest `main`, then rebase the branch onto it before opening a PR.
 - Open a normal pull request, never a draft. Follow the repository's title
   conventions. Describe the problem briefly, then explain the solution.
   End the description with the model and harness that did the work.
   Include before and after images for UI changes when available.
-- Aim for one pull request per conversation. Keep its requirements together
-  and avoid unrelated work.
 - Verify review findings against the source. Fix real findings with focused
   tests where useful. Never commit temporary review probes.
 - When monitoring a pull request, poll checks and comments newer than the last

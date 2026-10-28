@@ -190,7 +190,6 @@ Before you call a behavior change done, check the applicable paths.
 - Open a normal pull request, never a draft. Follow the repository's title
   conventions. Describe the problem briefly, then explain the solution.
   End the description with the model and harness that did the work.
-  Include before and after images for UI changes when available.
 - Verify review findings against the source. Fix real findings with focused
   tests where useful. Never commit temporary review probes.
 - When monitoring a pull request, poll checks and comments newer than the last
